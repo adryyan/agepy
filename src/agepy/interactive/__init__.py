@@ -2,8 +2,3 @@
 
 """
 from ._interactive import AGEDataViewer, AGEpp
-import agepy.interactive.fitting as fitting
-
-__all__ = [
-    "fitting",
-]
