@@ -3,16 +3,14 @@ from typing import TYPE_CHECKING
 # Import importlib.resources for getting the icon paths
 from importlib.resources import path as ilrpath
 # Import PyQt6 modules
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QLayout,
     QVBoxLayout,
     QWidget,
-    QSlider
 )
-from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtGui import QIcon, QAction
 # Import matplotlib modules
 from matplotlib.backends.backend_qt5agg import (
     FigureCanvasQTAgg,
@@ -82,10 +80,10 @@ class AGEDataViewer(QMainWindow):
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.layout.addWidget(self.toolbar)
 
-    def add_roi_action(self, callback: callable):
+    def add_roi_action(self, callback: callable, hint: str = "Add ROI") -> None:
         # Add ROI button to toolbar
         with ilrpath("agepy.interactive.icons", "roi.svg") as ipath:
-            roi = QAction(QIcon(str(ipath)), "Add ROI", self)
+            roi = QAction(QIcon(str(ipath)), hint, self)
         roi.setCheckable(True)
         roi.triggered.connect(callback)
         actions = self.toolbar.actions()
@@ -95,10 +93,11 @@ class AGEDataViewer(QMainWindow):
         self,
         ax: Axes,
         on_select: callable,
-        interactive: bool = True
+        interactive: bool = True,
+        hint: str = "Add ROI"
     ) -> None:
         # Add the action
-        self.add_roi_action(self.toggle_selector)
+        self.add_roi_action(self.toggle_selector, hint=hint)
         # Add ROI selector
         self.selector = RectangleSelector(
             ax, on_select,
