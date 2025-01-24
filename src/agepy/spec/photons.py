@@ -6,8 +6,10 @@ from typing import Union, Tuple, Sequence
 from typing import TYPE_CHECKING
 import warnings
 
+import os
 import pickle
 import numpy as np
+from scipy.interpolate import CubicSpline
 import matplotlib.pyplot as plt
 import h5py
 
@@ -43,7 +45,7 @@ class Spectrum:
     @classmethod
     def from_h5(cls,
         file_path: str,
-        raw: str = "dld_rd#raw/0/0.0",
+        raw: str = "dld_rd#raw",
         time: int = None,
         anode: PositionAnode = DldAnodeUVW(0),
         target_density: str = None,
@@ -52,7 +54,7 @@ class Spectrum:
     ) -> None:
         with h5py.File(file_path, "r") as h5:
             # Load the raw data
-            raw = np.asarray(h5[raw])
+            raw = np.asarray(h5[raw + "/0/0.0"])
             # Add deprecated normalization parameters for backwards compatibility
             if target_density is not None:
                 norm["target_density"] = target_density
@@ -62,7 +64,7 @@ class Spectrum:
             for key, h5path in norm.items():
                 if h5path not in h5:
                     raise ValueError("Normalization parameter not found.")
-                norm[key] = h5[h5path][0]
+                norm[key] = h5[h5path + "/0"][0]
         # Initialize the Spectrum
         return cls(anode.process(raw), time=time, **norm)
 
@@ -210,7 +212,165 @@ class Spectrum:
         setattr(self, norm, ureg.Quantity(val, fro).m_as(to))
 
 
-class Scan:
+class BaseScan:
+
+    def __init__(self,
+        data_files: Sequence[str],
+        anode: PositionAnode,
+        scan_var: str = None,
+        raw: str = "dld_rd#raw",
+        time_per_step: Union[int, Sequence[int]] = None,
+        roi: dict = None,
+        target_density: str = None,
+        intensity_upstream: str = None,
+        **norm,
+    ) -> None:
+        self.spectra = []
+        self.steps = []
+        self.id = []
+        if isinstance(data_files, str):
+            data_files = [data_files]
+        if isinstance(time_per_step, int):
+            time_per_step = [time_per_step] * len(data_files)
+        if len(time_per_step) != len(data_files):
+            raise ValueError("time_per_step must be a single int or a list "
+                             "of the same length as data_files.")
+        # Add deprecated normalization parameters for backwards compatibility
+        if target_density is not None:
+            norm["target_density"] = target_density
+        if intensity_upstream is not None:
+                norm["intensity_upstream"] = intensity_upstream
+        for f, t in zip(data_files, time_per_step):
+            spec, steps = self._load_spectra(f, scan_var, raw, anode, t, **norm)
+            self.spectra.extend(spec)
+            self.steps.extend(steps)
+            # Add the measurement number as the id
+            f = os.path.basename(f)[:3]
+            self.id.extend([f] * len(steps))
+        # Convert to numpy arrays
+        self.steps = np.array(self.steps)
+        self.spectra = np.array(self.spectra)
+        self.id = np.array(self.id)
+        # Sort the spectra by step values
+        _sort = np.argsort(self.steps)
+        self.steps = self.steps[_sort]
+        self.spectra = self.spectra[_sort]
+        self.id = self.id[_sort]
+        # Initialize attributes
+        self.roi = roi  # Region of interest for the detector
+        self.qeff = None  # Detector efficiencies
+        self.bkg = None  # Background spectrum (dark counts)
+        self.calib = None  # Wavelength calibration
+
+    def _load_spectra(self,
+        file_path: str,
+        scan_var: str,
+        raw: str,
+        anode: PositionAnode,
+        time_per_step: int,
+        **norm,
+    ) -> Tuple[list, list]:
+        with h5py.File(file_path, "r") as h5:
+            # Load the steps
+            if scan_var is not None:
+                steps = h5[scan_var + "/0"]
+            # Load the raw data
+            raw = h5[raw + "/0"]
+            # Load normalization values
+            for key, h5path in norm.items():
+                norm[key] = np.asarray(h5[h5path + "/0"])
+            # Format the data and steps
+            spectra = []
+            step_val = []
+            for i, step in enumerate(raw.keys()):
+                # Format the step value
+                if scan_var is not None:
+                    step_val.append(steps[step][0][0])
+                else:
+                    step_val.append(float(step))
+                # Format the raw data
+                data = np.asarray(raw[step])
+                # Format the normalization values
+                step_norm = {key: value[i] for key, value in norm.items()}
+                # Initialize the spectrum instance
+                spectra.append(Spectrum(anode.process(data),
+                                        time=time_per_step, **step_norm))
+        # Return the spectra and energies
+        return spectra, step_val
+
+    def counts(self,
+        roi: dict = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get the photon-excitation energy spectrum.
+
+        Parameters
+        ----------
+        roi: dict
+            Region of interest for the detector. If not provided, the
+            full detector is used.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray]
+            The number of counts (normalized), the respective
+            statistical uncertainties, and the exciting-photon energies.
+
+        """
+        if roi is None:
+            roi = self.roi
+        vectorized_counts = np.vectorize(
+            lambda spec: spec.counts(roi=roi)
+        )
+        n, err = vectorized_counts(self.spectra)
+        return n, err, self.steps
+
+    def transform_norm(self, norm: str, func: callable):
+        for spec in self.spectra:
+            spec.transform_norm(norm, func)
+
+    def convert_unit(self, norm: str, fro: str, to: str):
+        try:
+            from pint import UnitRegistry
+
+        except ImportError:
+            raise ImportError("pint is required to convert units.")
+        ureg = UnitRegistry()
+        trafo = lambda x: ureg.Quantity(x, fro).m_as(to)
+        self.transform_norm(norm, trafo)
+
+    def remove_steps(self,
+        measurement_number: str,
+        steps: Union[Sequence[int], Sequence[float]],
+    ) -> None:
+        mask = np.argwhere(self.id == measurement_number).flatten()
+        inds = []
+        for step in steps:
+            inds.append(np.argsort(np.abs(self.steps[mask] - step))[0])
+        mask = mask[inds]
+        # Remove the steps
+        self.steps = np.delete(self.steps, mask)
+        self.spectra = np.delete(self.spectra, mask)
+        self.id = np.delete(self.id, mask)
+
+    def save(self, filepath: str) -> None:
+        """
+        Save a scan with pickle.
+
+        """
+        with open(filepath, "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filepath: str) -> Scan:
+        """
+        Load a scan with pickle.
+
+        """
+        with open(filepath, "rb") as f:
+            return pickle.load(f)
+
+
+class Scan(BaseScan):
     """Scan over some variable with a spectrum for each step.
 
     Parameters
@@ -251,126 +411,14 @@ class Scan:
 
     """
 
-    def __init__(self,
-        data_files: Sequence[str],
-        anode: PositionAnode,
-        scan_var: str = None,
-        raw: str = "dld_rd#raw/0",
-        time_per_step: int = None,
-        roi: dict = None,
-        target_density: str = None,
-        intensity_upstream: str = None,
-        **norm,
-    ) -> None:
-        self.spectra = []
-        self.steps = []
-        self.id = []
-        if isinstance(data_files, str):
-            data_files = [data_files]
-        # Add deprecated normalization parameters for backwards compatibility
-        if target_density is not None:
-            norm["target_density"] = target_density
-        if intensity_upstream is not None:
-                norm["intensity_upstream"] = intensity_upstream
-        for f in data_files:
-            spec, steps = self._load_spectra(
-                f, scan_var, raw, anode, time_per_step, **norm)
-            self.spectra.extend(spec)
-            self.steps.extend(steps)
-            self.id.extend([f[:3]] * len(steps))
-        # Convert to numpy arrays
-        self.steps = np.array(self.steps)
-        self.spectra = np.array(self.spectra)
-        self.id = np.array(self.id)
-        # Sort the spectra by step values
-        _sort = np.argsort(self.steps)
-        self.steps = self.steps[_sort]
-        self.spectra = self.spectra[_sort]
-        self.id = self.id[_sort]
-        # Initialize attributes
-        self.roi = roi  # Region of interest for the detector
-        self.qeff = None  # Detector efficiencies
-        self.bkg = None  # Background spectrum (dark counts)
-        self.calib = None  # Wavelength calibration
+    def set_qeff(self, qeff: QEffScan) -> None:
+        self.qeff = qeff
 
-    def _load_spectra(self,
-        file_path: str,
-        scan_var: str,
-        raw: str,
-        anode: PositionAnode,
-        time_per_step: int,
-        **norm,
-    ) -> Tuple[list, list]:
-        with h5py.File(file_path, "r") as h5:
-            # Load the steps
-            if scan_var is not None:
-                steps = h5[scan_var]
-            # Load the raw data
-            raw = h5[raw]
-            # Load normalization values
-            for key, h5path in norm.items():
-                norm[key] = np.asarray(h5[h5path])
-            # Format the data and steps
-            spectra = []
-            step_val = []
-            for i, step in enumerate(raw.keys()):
-                # Format the step value
-                if scan_var is not None:
-                    step_val.append(steps[step][0][0])
-                else:
-                    step_val.append(float(step))
-                # Format the raw data
-                data = np.asarray(raw[step])
-                # Format the normalization values
-                step_norm = {key: value[i] for key, value in norm.items()}
-                # Initialize the spectrum instance
-                spectra.append(Spectrum(anode.process(data),
-                                        time=time_per_step, **step_norm))
-        # Return the spectra and energies
-        return spectra, step_val
+    def set_bkg(self, bkg: Spectrum) -> None:
+        self.bkg = bkg
 
-    def save(self, filepath: str) -> None:
-        """
-        Save a scan with pickle.
-
-        """
-        with open(filepath, "wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def load(filepath: str) -> Scan:
-        """
-        Load a scan with pickle.
-
-        """
-        with open(filepath, "rb") as f:
-            return pickle.load(f)
-
-    def counts(self,
-        roi: dict = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get the photon-excitation energy spectrum.
-
-        Parameters
-        ----------
-        roi: dict
-            Region of interest for the detector. If not provided, the
-            full detector is used.
-
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray, np.ndarray]
-            The number of counts (normalized), the respective
-            statistical uncertainties, and the exciting-photon energies.
-
-        """
-        if roi is None:
-            roi = self.roi
-        vectorized_counts = np.vectorize(
-            lambda spec: spec.counts(roi=roi)
-        )
-        n, err = vectorized_counts(self.spectra)
-        return n, err, self.steps
+    def set_calib(self, a0: float, a1: float) -> None:
+        self.calib = (a0, a1)
 
     def spectrum_at(self,
         step: Union[int, float],
@@ -390,40 +438,6 @@ class Scan:
                           "Returning the first.")
         spec = spec[0]
         return spec.spectrum(edges, roi=roi)
-
-    def convert_unit(self, norm: str, fro: str, to: str):
-        try:
-            from pint import UnitRegistry
-
-        except ImportError:
-            raise ImportError("pint is required to convert units.")
-        ureg = UnitRegistry()
-        trafo = lambda x: ureg.Quantity(x, fro).m_as(to)
-        for spec in self.spectra:
-            spec.transform_norm(norm, trafo)
-
-    def set_qeff(self, qeff: QEffScan) -> None:
-        self.qeff = (*qeff.efficiencies(), qeff.xe)
-
-    def set_bkg(self, bkg: Spectrum) -> None:
-        self.bkg = bkg
-
-    def set_calib(self, a0: float, a1: float) -> None:
-        self.calib = (a0, a1)
-
-    def remove_steps(self,
-        measurement_number: str,
-        steps: Union[Sequence[int], Sequence[float]],
-    ) -> None:
-        mask = np.argwhere(self.id == measurement_number).flatten()
-        inds = []
-        for step in steps:
-            inds.append(np.argsort(self.steps[mask] - step)[0])
-        mask = mask[inds]
-        # Remove the steps
-        self.steps = np.delete(self.steps, mask)
-        self.spectra = np.delete(self.spectra, mask)
-        self.id = np.delete(self.id, mask)
 
     def show_spectra(self):
         """Plot the spectra in an interactive window.
@@ -476,8 +490,8 @@ class EnergyScan(Scan):
         data_files: Sequence[str],
         anode: PositionAnode,
         energies: str = None,
-        raw: str = "dld_rd#raw/0",
-        time_per_step: int = None,
+        raw: str = "dld_rd#raw",
+        time_per_step: Union[int, Sequence[int]] = None,
         roi: dict = None,
         target_density: str = None,
         intensity_upstream: str = None,
@@ -525,51 +539,57 @@ class QEffScan(Scan):
         data_files: Sequence[str],
         anode: PositionAnode,
         raw: str = "dld_rd#raw/0",
-        time_per_step: int = None,
+        time_per_step: Union[int, Sequence[int]] = None,
         roi: dict = None,
-        binning: int = 24,
         model: str = "gaussian",
         **norm,
     ) -> None:
+        # Force the x roi to cover the full detector
+        if roi is not None:
+            roi["x"]["min"] = 0
+            roi["x"]["max"] = 1
         super().__init__(data_files, anode, None, raw, time_per_step, roi, **norm)
-        n = len(self.steps)
-        if binning > n:
-            warnings.warn("Binning larger than number of recorded steps. "
-                          "Setting binning to number of steps.")
-            binning = n
         # Set the model for the fits
         self.model = model
         # Initialize the result arrays
-        _, self.xe = np.histogram([], bins=binning, range=(0, 1))
+        n = len(self.steps)
         self._py = np.full(n, np.nan, dtype=np.float64)
         self._pyerr = np.full(n, np.nan, dtype=np.float64)
         self._px = np.full(n, np.nan, dtype=np.float64)
 
-    def efficiencies(self) -> Tuple[np.ndarray, np.ndarray]:
-        # Calculate the efficiencies for each bin
-        _efficiencies = np.zeros(len(self.xe)-1, dtype=np.float64)
-        _errors = np.zeros(len(self.xe)-1, dtype=np.float64)
-        inds = np.digitize(self._px, self.xe)
-        for i in range(len(_efficiencies)):
-            c = 0
-            for j in np.argwhere(inds == i).flatten():
-                if self._py[j] == np.nan:
-                    continue
-                _efficiencies[i] += self._py[j]
-                _errors[i] += self._pyerr[j]**2
-                c += 1
-            if c >= 1:
-                _efficiencies[i] /= c
-                _errors[i] = np.sqrt(_errors[i]) / c
-        # Interpolate the efficiencies, if necessary
-        for i in range(1, len(_efficiencies)-1):
-            if _efficiencies[i] == 0:
-                if (_efficiencies[i-1] != 0) and (_efficiencies[i+1] != 0):
-                    _efficiencies[i] = (_efficiencies[i-1] + _efficiencies[i+1]) * 0.5
-                    _errors[i] = (_errors[i-1] + _errors[i+1]) * 0.5
-        # Normalize the efficiencies to maximum value
-        m = _efficiencies.max()
-        return _efficiencies / m, _errors / m
+    def efficiencies(self, edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        # Get center of bins
+        dx = (edges[1] - edges[0]) * 0.5
+        x = edges[:-1] + dx
+        # Get the fit values
+        py, pyerr, px = self.fit_results()
+        # Interpolate the efficiencies
+        def interp(y):
+            spl = CubicSpline(px, y, bc_type="natural")
+            return spl(x)
+        # Generate samples
+        n = 10000
+        y_samples = np.random.normal(loc=py, scale=pyerr, size=(n, len(py)))
+        eff_samples = np.stack([interp(y) for y in y_samples], axis=0)
+        # Calculate the mean and standard deviation
+        eff = np.mean(eff_samples, axis=0)
+        err = np.std(eff_samples, axis=0)
+        # Set values outside the interpolation range to 0
+        eff[x < px[0]] = 0
+        eff[x > px[-1]] = 0
+        err[x < px[0]] = 0
+        err[x > px[-1]] = 0
+        return eff, err
+
+    def fit_results(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Remove NaN values
+        mask = ~np.isnan(self._px)
+        py = self._py[mask]
+        pyerr = self._pyerr[mask]
+        px = self._px[mask]
+        # Sort the values
+        sort = np.argsort(px)
+        return py[sort] / py.max(), pyerr[sort] / py.max(), px[sort]
 
     def fit_highest_peak(self) -> None:
         edges = np.histogram([], bins=1024, range=(0, 1))[1]
@@ -658,13 +678,19 @@ class QEffScan(Scan):
             fig, ax = plt.subplots()
         else:
             fig = ax.get_figure()
-        eff, err = self.efficiencies()
-        nonzero = np.argwhere(eff > 0).flatten()
-        eff = eff[nonzero[0]:nonzero[-1]+1]
-        err = err[nonzero[0]:nonzero[-1]+1]
-        dx = (self.xe[1] - self.xe[0]) * 0.5
-        x = self.xe[nonzero[0]:nonzero[-1]+1] + dx
-        ax.errorbar(x, eff, yerr=err, xerr=dx, fmt="+", color=color, label=label)
+        # Plot fit values
+        y, yerr, x = self.fit_results()
+        ax.errorbar(x, y, yerr=yerr, fmt="s", color=color, label=label)
+        ylim = ax.get_ylim()
+        ax.set_ylim(ylim)
+        # Plot the interpolated values
+        xe = np.histogram([], bins=1024, range=(0, 1))[1]
+        x = xe[:-1] + (xe[1] - xe[0]) * 0.5
+        eff, err = self.efficiencies(xe)
+        ax.plot(x, eff, color=color, linestyle="-")
+        ax.fill_between(x, eff - err, eff + err, color=color, alpha=0.3)
+        # Set ylim to auto
+        ax.set_ylim(auto=True)
         ax.set_xlabel("Detector Position [arb. u.]")
         ax.set_ylabel("Efficiency [arb. u.]")
         ax.set_xlim(0, 1)
@@ -672,21 +698,4 @@ class QEffScan(Scan):
         return fig, ax
 
     def set_qeff(self, qeff: QEffScan) -> None:
-        snake = """
-        ⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣶⣶⣿⣿⣿⣿⣿⣷⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣶⣶⡿⠿⢿⣿⣶⣶⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀
-        ⠀⠀⠀⠀⠀⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⠞⠋⠉⠀⠀⠀⠀⠀⠀⠀⠉⠛⢿⣿⣷⣄⠀⠀⠀⠀⠀
-        ⠀⠀⠀⣠⣾⣿⣿⣿⣿⠿⠛⠉⠁⠀⠀⠀⠀⠉⠙⠻⢿⣿⣿⣿⣿⣄⠀⠀⠀⠀⠀⠀⠀⠀⣀⣴⣶⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⣿⣷⣄⠀⠀⠀
-        ⠀⠀⣼⣿⣿⣿⡿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣷⡀⠀⠀⠀⢀⣶⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⣿⣿⣧⠀⠀
-        ⠀⣼⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⣿⣿⣿⣿⣄⠀⠀⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⣿⣿⣧⠀
-        ⢸⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢿⣿⣿⣿⢂⣾⣿⣿⣿⠿⠛⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⡄
-        ⣿⣿⣿⣿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⡿⢡⣿⣿⣿⡿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣿⣿⡇
-        ⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣱⣿⣿⣿⡿⡁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⡇
-        ⢿⣿⣿⣿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⡟⣴⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣿⣿⡇
-        ⠸⣿⣿⣿⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⠏⢸⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣿⠁
-        ⠀⢻⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣿⣿⣿⡿⠃⠀⠀⠹⣿⣿⣿⣿⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⣿⣿⠃⠀
-        ⠀⠀⠹⣿⣿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣾⣿⣿⣿⠟⠁⠀⠀⠀⠀⠈⢻⣿⣿⣿⣷⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣾⣿⣿⡿⠃⠀⠀
-        ⠀⠀⠀⠈⠻⣿⣿⣿⣿⣶⣤⣀⣀⠀⠀⠀⣀⣀⣤⣶⣿⣿⣿⣿⡿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿⣶⣤⣀⣀⠀⠀⠀⢀⣀⣤⣶⣿⣿⣿⣿⠟⠁⠀⠀⠀
-        ⠀⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀⠀
-        ⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠛⠻⠿⠿⠿⠿⠿⠟⠛⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠻⠿⢿⣿⣿⣿⠿⠿⠟⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀
-        """
-        print(snake)
+        raise NotImplementedError("QEffScan cannot set QEffScan.")

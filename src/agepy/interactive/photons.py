@@ -80,24 +80,27 @@ class QEffViewer(AGEScanViewer):
         x2, y2 = erelease.xdata, erelease.ydata
         # Fit in the selected region
         m = self.scan._fit_in_range(self.step, (x1, x2))
-        try:
-            from iminuit.qtwidget import make_widget
+        if not m.valid:
+            try:
+                from iminuit.qtwidget import make_widget
 
-        except ImportError:
-            print("iminuit.qtwidget not installed")
+            except ImportError:
+                print("iminuit.qtwidget not installed")
+            else:
+                # Create the widget
+                self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
+                self.debug_fit.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.step, m))
+                self.debug_fit.show()
         else:
-            # Create the widget
-            self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
-            self.debug_fit.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-            self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.step, m))
-            self.debug_fit.show()
-        # Clear the selector
-        self.selector.clear()
-        # Go to next step
-        self.plot_next()
+            # Clear the selector
+            self.selector.clear()
+            # Go to the next plot
+            self.plot_next()
 
     def on_fit_closed(self, step, m):
-        print(m)
+        # Clear the selector
+        self.selector.clear()
         self.scan._add_fit_result(step, m.values["s"], m.errors["s"], m.values["loc"])
         self.debug_fit = None
         self.plot_next()
