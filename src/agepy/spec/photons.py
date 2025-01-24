@@ -10,11 +10,12 @@ import os
 import pickle
 import numpy as np
 from scipy.interpolate import CubicSpline
+import pandas as pd
 import matplotlib.pyplot as plt
 import h5py
 
 from ._anodes import *
-from agepy.interactive.photons import AGEScanViewer, QEffViewer
+from agepy.interactive.photons import AGEScanViewer, QEffViewer, PhexViewer
 from agepy.interactive import AGEpp
 
 # Import modules for type hinting
@@ -70,7 +71,7 @@ class Spectrum:
 
     def counts(self,
         roi: dict = None,
-        qeff: Tuple[np.ndarray, np.ndarray] = None,
+        qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         background: Spectrum = None,
     ) -> Tuple[float, float]:
         """Get number of counts in the spectrum and the estimated
@@ -96,7 +97,7 @@ class Spectrum:
             det_image = det_image[det_image[:,0] < roi["x"]["max"]]
         # Apply spatial detector efficiency correction
         if qeff is not None:
-            eff, xe = qeff
+            eff, eff_err, xe = qeff
             x_inds = np.digitize(det_image[:,0], xe)
             # Get the inverse of the efficiency
             inv_eff = 1 / eff[x_inds]
@@ -125,7 +126,7 @@ class Spectrum:
     def spectrum(self,
         edges: np.ndarray,
         roi: dict = None,
-        qeff: Tuple[np.ndarray, np.ndarray] = None,
+        qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         background: Spectrum = None,
         calib: Tuple[float, float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -147,7 +148,7 @@ class Spectrum:
         det_image = det_image[:,0].flatten()
         # Apply spatial detector efficiency correction
         if qeff is not None:
-            eff, xe = qeff
+            eff, eff_err, xe = qeff
             x_inds = np.digitize(det_image, xe)
             eff = 1 / eff[x_inds]
         else:
@@ -305,9 +306,8 @@ class BaseScan:
 
         Parameters
         ----------
-        roi: dict
-            Region of interest for the detector. If not provided, the
-            full detector is used.
+        roi: dict, optional
+            Ignore set region of interest and use the provided one instead. 
 
         Returns
         -------
@@ -318,8 +318,12 @@ class BaseScan:
         """
         if roi is None:
             roi = self.roi
+        if self.qeff is None:
+            qeff = None
+        else:
+            qeff = self.qeff.efficiencies(np.histogram([], bins=512, range=(0, 1))[1])
         vectorized_counts = np.vectorize(
-            lambda spec: spec.counts(roi=roi)
+            lambda spec: spec.counts(roi=roi, qeff=qeff, background=self.bkg)
         )
         n, err = vectorized_counts(self.spectra)
         return n, err, self.steps
@@ -507,6 +511,18 @@ class EnergyScan(Scan):
     @energies.setter
     def energies(self, value: np.ndarray) -> None:
         self.steps = value
+
+    def calibrate_energies(self,
+        reference: pd.DataFrame,
+        qnum: Sequence[str],
+        energy_range: float,
+        simulation: pd.DataFrame = None,
+    ) -> None:
+        """Calibrate the exciting-photon energies.
+
+        """
+        app = AGEpp(PhexViewer, self, reference, qnum, energy_range, simulation)
+        app.run()
 
 
 class QEffScan(Scan):
