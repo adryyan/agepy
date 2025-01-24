@@ -6,7 +6,6 @@ from typing import Union, Tuple, Sequence
 from typing import TYPE_CHECKING
 import warnings
 
-import os
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -153,11 +152,11 @@ class Spectrum:
             eff = np.ones(det_image.shape[0])
         # Convert x values to wavelengths
         if calib is not None:
-            a, b = calib
-            det_image = a * det_image + b
+            a0, a1 = calib
+            det_image = a1 * det_image + a0
             # Adjust x roi filter to wavelength binning
-            wl_min = edges[edges > (a * roi["x"]["min"] + b)][0]
-            wl_max = edges[edges < (a * roi["x"]["max"] + b)][-1]
+            wl_min = edges[edges > (a1 * roi["x"]["min"] + a0)][0]
+            wl_max = edges[edges < (a1 * roi["x"]["max"] + a0)][-1]
             xroi = (det_image >= wl_min) & (det_image <= wl_max)
         else:
             # Adjust x roi filter to detector binning
@@ -263,9 +262,9 @@ class Scan:
         intensity_upstream: str = None,
         **norm,
     ) -> None:
-        self.roi = roi
         self.spectra = []
         self.steps = []
+        self.id = []
         if isinstance(data_files, str):
             data_files = [data_files]
         # Add deprecated normalization parameters for backwards compatibility
@@ -278,13 +277,21 @@ class Scan:
                 f, scan_var, raw, anode, time_per_step, **norm)
             self.spectra.extend(spec)
             self.steps.extend(steps)
+            self.id.extend([f[:3]] * len(steps))
         # Convert to numpy arrays
         self.steps = np.array(self.steps)
         self.spectra = np.array(self.spectra)
+        self.id = np.array(self.id)
         # Sort the spectra by step values
         _sort = np.argsort(self.steps)
         self.steps = self.steps[_sort]
         self.spectra = self.spectra[_sort]
+        self.id = self.id[_sort]
+        # Initialize attributes
+        self.roi = roi  # Region of interest for the detector
+        self.qeff = None  # Detector efficiencies
+        self.bkg = None  # Background spectrum (dark counts)
+        self.calib = None  # Wavelength calibration
 
     def _load_spectra(self,
         file_path: str,
@@ -394,6 +401,29 @@ class Scan:
         trafo = lambda x: ureg.Quantity(x, fro).m_as(to)
         for spec in self.spectra:
             spec.transform_norm(norm, trafo)
+
+    def set_qeff(self, qeff: QEffScan) -> None:
+        self.qeff = (*qeff.efficiencies(), qeff.xe)
+
+    def set_bkg(self, bkg: Spectrum) -> None:
+        self.bkg = bkg
+
+    def set_calib(self, a0: float, a1: float) -> None:
+        self.calib = (a0, a1)
+
+    def remove_steps(self,
+        measurement_number: str,
+        steps: Union[Sequence[int], Sequence[float]],
+    ) -> None:
+        mask = np.argwhere(self.id == measurement_number).flatten()
+        inds = []
+        for step in steps:
+            inds.append(np.argsort(self.steps[mask] - step)[0])
+        mask = mask[inds]
+        # Remove the steps
+        self.steps = np.delete(self.steps, mask)
+        self.spectra = np.delete(self.spectra, mask)
+        self.id = np.delete(self.id, mask)
 
     def show_spectra(self):
         """Plot the spectra in an interactive window.
@@ -640,3 +670,23 @@ class QEffScan(Scan):
         ax.set_xlim(0, 1)
         ax.set_title("Detector Efficiencies")
         return fig, ax
+
+    def set_qeff(self, qeff: QEffScan) -> None:
+        snake = """
+        ⠀⠀⠀⠀⠀⠀⠀⢀⣠⣤⣶⣶⣿⣿⣿⣿⣿⣷⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣶⣶⡿⠿⢿⣿⣶⣶⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀
+        ⠀⠀⠀⠀⠀⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⠞⠋⠉⠀⠀⠀⠀⠀⠀⠀⠉⠛⢿⣿⣷⣄⠀⠀⠀⠀⠀
+        ⠀⠀⠀⣠⣾⣿⣿⣿⣿⠿⠛⠉⠁⠀⠀⠀⠀⠉⠙⠻⢿⣿⣿⣿⣿⣄⠀⠀⠀⠀⠀⠀⠀⠀⣀⣴⣶⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⣿⣷⣄⠀⠀⠀
+        ⠀⠀⣼⣿⣿⣿⡿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣷⡀⠀⠀⠀⢀⣶⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⣿⣿⣧⠀⠀
+        ⠀⣼⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⣿⣿⣿⣿⣄⠀⠀⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⣿⣿⣧⠀
+        ⢸⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢿⣿⣿⣿⢂⣾⣿⣿⣿⠿⠛⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⡄
+        ⣿⣿⣿⣿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⡿⢡⣿⣿⣿⡿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣿⣿⡇
+        ⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣱⣿⣿⣿⡿⡁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⡇
+        ⢿⣿⣿⣿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⡟⣴⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣿⣿⡇
+        ⠸⣿⣿⣿⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⠏⢸⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣿⠁
+        ⠀⢻⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣿⣿⣿⡿⠃⠀⠀⠹⣿⣿⣿⣿⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⣿⣿⠃⠀
+        ⠀⠀⠹⣿⣿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣾⣿⣿⣿⠟⠁⠀⠀⠀⠀⠈⢻⣿⣿⣿⣷⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣾⣿⣿⡿⠃⠀⠀
+        ⠀⠀⠀⠈⠻⣿⣿⣿⣿⣶⣤⣀⣀⠀⠀⠀⣀⣀⣤⣶⣿⣿⣿⣿⡿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿⣶⣤⣀⣀⠀⠀⠀⢀⣀⣤⣶⣿⣿⣿⣿⠟⠁⠀⠀⠀
+        ⠀⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀⠀
+        ⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠛⠻⠿⠿⠿⠿⠿⠟⠛⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠻⠿⢿⣿⣿⣿⠿⠿⠟⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀
+        """
+        print(snake)
