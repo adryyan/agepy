@@ -144,8 +144,8 @@ class PhexViewer(AGEDataViewer):
         # Add Look-Up button
         self.add_lookup_action(self.look_up)
         # Prepare the data
-        self.y, self.yerr = self.scan.counts()
-        self.x = np.copy(self.scan.energies)
+        self.y, self.yerr, self.x = self.scan.counts()
+        self.ymax = np.max(self.y)
         # Set the x limit
         self.dx = energy_range
         self.xlim = (self.x[0], self.x[0] + self.dx)
@@ -171,10 +171,13 @@ class PhexViewer(AGEDataViewer):
                     "E <= @self.xlim[1]")
             for i, row in ref.iterrows():
                 self.ax.axvline(row["E"], color="black", linestyle="--")
-                text = f"{row["El"]},{row["branch"]},{row["vp"]},{row["Jp"]}"
-                self.ax.text(row["E"] + 0.0002, np.max(y), text, ha="left",
+                text = f"{row[self.qnum[0]]}"
+                for q in self.qnum[1:]:
+                    text += f",{row[q]}"
+                self.ax.text(row["E"] + 0.0002, self.ymax, text, ha="left",
                              va="top", rotation=90)
             self.ax.set_xlim(self.xlim)
+            self.ax.set_ylim(top=self.ymax * 1.05)
             self.ax.set_xlabel("Energy [eV]")
             self.ax.set_ylabel(r"Counts [arb.$\,$u.]")
             self.canvas.draw_idle()

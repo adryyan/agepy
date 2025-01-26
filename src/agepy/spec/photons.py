@@ -98,9 +98,14 @@ class Spectrum:
         # Apply spatial detector efficiency correction
         if qeff is not None:
             eff, eff_err, xe = qeff
-            x_inds = np.digitize(det_image[:,0], xe)
+            x_inds = np.digitize(det_image[:,0], xe[1:])
             # Get the inverse of the efficiency
-            inv_eff = 1 / eff[x_inds]
+            eff = eff[x_inds]
+            eff_err = eff_err[x_inds]
+            nonzero = eff > 0
+            eff = eff[nonzero]
+            eff_err = eff_err[nonzero]
+            inv_eff = 1 / eff
         else:
             inv_eff = np.ones(det_image.shape[0])
         # Calculate the number of counts
@@ -321,12 +326,17 @@ class BaseScan:
         if self.qeff is None:
             qeff = None
         else:
-            qeff = self.qeff.efficiencies(np.histogram([], bins=512, range=(0, 1))[1])
+            edges = np.histogram([], bins=512, range=(0, 1))[1]
+            qeff = (*self.qeff.efficiencies(edges), edges)
+
         vectorized_counts = np.vectorize(
             lambda spec: spec.counts(roi=roi, qeff=qeff, background=self.bkg)
         )
         n, err = vectorized_counts(self.spectra)
         return n, err, self.steps
+
+    def norm(self, norm: str) -> np.ndarray:
+        return np.array([getattr(spec, norm) for spec in self.spectra])
 
     def transform_norm(self, norm: str, func: callable):
         for spec in self.spectra:
