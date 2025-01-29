@@ -3,8 +3,9 @@ from typing import Sequence, Tuple
 from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
-from PySide6.QtWidgets import QPushButton
-from PySide6.QtCore import Qt
+# Import PySide6 / PyQt6 modules
+from . util import import_qt_binding
+qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
 # Import internal modules
 from agepy.interactive import AGEDataViewer
 from agepy import ageplot
@@ -73,7 +74,7 @@ class QEffViewer(AGEScanViewer):
         # then fit the data within that region
         self.add_rect_selector(self.ax, self.on_select, hint="Select Peak")
         # Add button to view results
-        self.view_results = QPushButton("View Results")
+        self.view_results = QtWidgets.QPushButton("View Results")
         self.view_results.setCheckable(True)
         self.view_results.clicked.connect(self.show_results)
         self.toolbar.addWidget(self.view_results)
@@ -92,7 +93,7 @@ class QEffViewer(AGEScanViewer):
             else:
                 # Create the widget
                 self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
-                self.debug_fit.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
                 self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.step, m))
                 self.debug_fit.show()
         else:

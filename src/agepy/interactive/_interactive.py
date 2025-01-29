@@ -2,15 +2,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 # Import importlib.resources for getting the icon paths
 from importlib.resources import path as ilrpath
-# Import PyQt6 modules
-from PySide6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QLayout,
-    QVBoxLayout,
-    QWidget,
-)
-from PySide6.QtGui import QIcon, QAction
+# Import PySide6 / PyQt6 modules
+from . util import import_qt_binding
+qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
 # Import matplotlib modules
 from matplotlib.backends.backend_qt5agg import (
     FigureCanvasQTAgg,
@@ -28,7 +22,7 @@ if TYPE_CHECKING:
 __all__ = []
 
 
-class AGEDataViewer(QMainWindow):
+class AGEDataViewer(QtWidgets.QMainWindow):
     """Minimal implementation of the AGE Data Viewer.
     Should be used as a base class for more complex viewers.
 
@@ -38,9 +32,9 @@ class AGEDataViewer(QMainWindow):
         # Set up the PyQt window
         self.setWindowTitle("AGE Data Viewer")
         self.setGeometry(100, 100, width, height)
-        self.main_widget = QWidget(self)
+        self.main_widget = QtWidgets.QWidget(self)
         self.setCentralWidget(self.main_widget)
-        self.layout = QVBoxLayout(self.main_widget)
+        self.layout = QtWidgets.QVBoxLayout(self.main_widget)
         # Initialize attributes
         self.canvas = None
         self.toolbar = None
@@ -49,7 +43,7 @@ class AGEDataViewer(QMainWindow):
         self,
         fig: Figure = None,
         ax: Union[Axes, Sequence[Axes]] = None,
-        layout: QLayout = None,
+        layout: QtWidgets.QLayout = None,
         width: int = 1200,
         height: int = 800
     ) -> None:
@@ -83,7 +77,7 @@ class AGEDataViewer(QMainWindow):
     def add_roi_action(self, callback: callable, hint: str = "Add ROI") -> None:
         # Add ROI button to toolbar
         with ilrpath("agepy.interactive.icons", "roi.svg") as ipath:
-            roi = QAction(QIcon(str(ipath)), hint, self)
+            roi = QtGui.QAction(QtGui.QIcon(str(ipath)), hint, self)
         roi.setCheckable(True)
         roi.triggered.connect(callback)
         actions = self.toolbar.actions()
@@ -121,28 +115,28 @@ class AGEDataViewer(QMainWindow):
         actions = self.toolbar.actions()
         # Add backward step to toolbar
         with ilrpath("agepy.interactive.icons", "bw-step.svg") as ipath:
-            bw = QAction(QIcon(str(ipath)), "Step Backward", self)
+            bw = QtGui.QAction(QtGui.QIcon(str(ipath)), "Step Backward", self)
         bw.triggered.connect(bw_callback)
         self.bw = self.toolbar.insertAction(actions[-1], bw)
         # Add forward step to toolbar
         with ilrpath("agepy.interactive.icons", "fw-step.svg") as ipath:
-            fw = QAction(QIcon(str(ipath)), "Step Forward", self)
+            fw = QtGui.QAction(QtGui.QIcon(str(ipath)), "Step Forward", self)
         fw.triggered.connect(fw_callback)
         self.fw = self.toolbar.insertAction(actions[-1], fw)
 
     def add_lookup_action(self, callback: callable) -> None:
         actions = self.toolbar.actions()
         with ilrpath("agepy.interactive.icons", "search.svg") as ipath:
-            lu = QAction(QIcon(str(ipath)), "Look Up", self)
+            lu = QtGui.QAction(QtGui.QIcon(str(ipath)), "Look Up", self)
         lu.triggered.connect(callback)
         self.lu = self.toolbar.insertAction(actions[-1], lu)
 
 
 class AGEpp:
-    def __init__(self, viewer: QMainWindow, *args, **kwargs):
-        self.app = QApplication.instance()
+    def __init__(self, viewer: QtWidgets.QMainWindow, *args, **kwargs):
+        self.app = QtWidgets.QApplication.instance()
         if self.app is None:
-            self.app = QApplication([])
+            self.app = QtWidgets.QApplication([])
         self.viewer = viewer(*args, **kwargs)
 
     def run(self):
