@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Sequence, Tuple
+import warnings
 from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ from . util import import_qt_binding
 qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
 # Import internal modules
 from agepy.interactive import AGEDataViewer
+from agepy.interactive.ui import PhexDialog
 from agepy import ageplot
 # Import modules for type hinting
 if TYPE_CHECKING:
@@ -147,6 +149,10 @@ class PhexViewer(AGEDataViewer):
         # Prepare the data
         self.y, self.yerr, self.x = self.scan.counts()
         self.ymax = np.max(self.y)
+        # Prepare the assignment fit data for plotting
+        self.x_fit = np.linspace(self.x[0], self.x[-1], len(self.x) * 100)
+        self.y_fit = np.zeros_like(self.x_fit)
+        self.yerr_fit = np.zeros_like(self.x_fit)
         # Set the x limit
         self.dx = energy_range
         self.xlim = (self.x[0], self.x[0] + self.dx)
@@ -159,7 +165,13 @@ class PhexViewer(AGEDataViewer):
         x = self.x[in_range]
         y = self.y[in_range]
         yerr = self.yerr[in_range]
+        in_range = (self.x_fit >= self.xlim[0]) & (self.x_fit <= self.xlim[1])
+        x_fit = self.x_fit[in_range]
+        y_fit = self.y_fit[in_range]
+        yerr_fit = self.yerr_fit[in_range]
         with ageplot.context(["age", "dataviewer"]):
+            # Clear the plot
+            self.ax.clear()
             # Plot the data
             self.ax.errorbar(x, y, yerr=yerr, xerr=0.0002, fmt="s",
                              color=ageplot.colors[0])
@@ -177,6 +189,10 @@ class PhexViewer(AGEDataViewer):
                     text += f",{row[q]}"
                 self.ax.text(row["E"] + 0.0002, self.ymax, text, ha="left",
                              va="top", rotation=90)
+            # Plot the assignments
+            self.ax.plot(x_fit, y_fit, color=ageplot.colors[1])
+            self.ax.fill_between(x_fit, y_fit - yerr_fit, y_fit + yerr_fit,
+                                color=ageplot.colors[1], alpha=0.5)
             self.ax.set_xlim(self.xlim)
             self.ax.set_ylim(top=self.ymax * 1.05)
             self.ax.set_xlabel("Energy [eV]")
@@ -200,10 +216,101 @@ class PhexViewer(AGEDataViewer):
         self.plot()
 
     def look_up(self):
-        pass
+        dialog = PhexDialog(self)
+        if dialog.exec():
+            exc = dialog.get_input()
+            if self.simulation is not None:
+                E = self.simulation.copy()
+            else:
+                E = self.reference.copy()
+            for q, val in zip(self.qnum, exc):
+                query_str = f"{q} == @val"
+                E.query(query_str, inplace=True)
+            if E.empty:
+                return
+            else:
+                E = E["E"].iloc[0]
+            E_min, E_max = E - self.dx * 0.5, E + self.dx * 0.5
+            if E_min >= self.x[-1] or E_max <= self.x[0]:
+                return
+            self.xlim = (E_min, E_max)
+            self.plot()
 
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
-        pass
+        xr = (eclick.xdata, erelease.xdata)
+        # Get the data in the selected range
+        in_range = (self.x >= xr[0]) & (self.x <= xr[1])
+        x = self.x[in_range]
+        y = self.y[in_range]
+        yerr = self.yerr[in_range]
+        # Import the fitting modules
+        try:
+            from iminuit import Minuit
+            from iminuit.cost import LeastSquares
+            from numba_stats import norm, bernstein
 
-    def on_fit_closed(self):
-        pass
+        except ImportError:
+            raise ImportError("iminuit and numba-stats is required for fitting.")
+
+        # Prepare the fit
+        def model(x, *par):
+            return par[0] * norm.pdf(x, *par[1:3]) + bernstein.density(x, par[3:], *xr)
+
+        start = [np.max(y), (xr[0] + xr[1]) * 0.5, 0.01 * (xr[1] - xr[0]), 1, 1, 1, 1]
+        limits = {
+            "s": (0, None),
+            "loc": (xr[0], xr[1]),
+            "scale": (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0])),
+            "a0": (0, None),
+            "a1": (0, None),
+            "a2": (0, None),
+            "a3": (0, None),
+        }
+        cost = LeastSquares(x, y, yerr, model)
+        m = Minuit(cost, *start, name=limits.keys())
+        # Set the limits
+        for par in limits:
+            m.limits[par] = limits[par]
+        # Fix the higher order bernstein terms
+        m.fixed["a1", "a2", "a3"] = True
+        # Fit the data
+        m.migrad()
+        # Debug the fit if it failed
+        if not m.valid:
+            try:
+                from iminuit.qtwidget import make_widget
+
+            except ImportError:
+                print("iminuit.qtwidget not installed")
+            else:
+                # Create the widget
+                self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
+                self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+                self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(m, model, xr))
+                self.debug_fit.show()
+        else:
+            self.on_fit_closed(m, model, xr)
+
+    def on_fit_closed(self, m, model, xr):
+        self.debug_fit = None
+        dialog = PhexDialog(self)
+        if dialog.exec():
+            exc = dialog.get_input()
+            val = np.array(m.values)
+            cov = np.array(m.covariance)
+            self.assignments[tuple(exc)] = (val, cov)
+            # Add the result to the fit data
+            in_range = (self.x_fit >= xr[0]) & (self.x_fit <= xr[1])
+            x_fit = self.x_fit[in_range]
+            self.y_fit[in_range] = model(x_fit, *val)
+            try:
+                from jacobi import propagate
+
+            except ImportError:
+                warnings.warn("jacobi not installed, fit uncertainty is not plotted.")
+                self.yerr_fit[in_range] = 0
+            else:
+                _, yerr_fit = propagate(lambda par: model(x_fit, *par), val, cov)
+                self.yerr_fit[in_range] = np.sqrt(np.diag(yerr_fit))
+            # Update the plot
+            self.plot()
