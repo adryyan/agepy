@@ -564,7 +564,7 @@ class QEffScan(Scan):
     def __init__(self,
         data_files: Sequence[str],
         anode: PositionAnode,
-        raw: str = "dld_rd#raw/0",
+        raw: str = "dld_rd#raw",
         time_per_step: Union[int, Sequence[int]] = None,
         roi: dict = None,
         model: str = "gaussian",
@@ -600,6 +600,52 @@ class QEffScan(Scan):
         # Calculate the mean and standard deviation
         eff = np.mean(eff_samples, axis=0)
         err = np.std(eff_samples, axis=0)
+        # Calculate the distance to the closest value in px for each value in x
+        distances = np.abs(x[:, np.newaxis] - px[np.newaxis, :])
+        min_distances = np.min(distances, axis=1)
+        # Add a penalty term dependend on the distance to the closest value
+        # This is kinda arbitrary and one should think about a better way to
+        # penalize interpolated values that are far away from the fit values
+        err += err * min_distances * 100
+        # Set values outside the interpolation range to 0
+        eff[x < px[0]] = 0
+        eff[x > px[-1]] = 0
+        err[x < px[0]] = 0
+        err[x > px[-1]] = 0
+        return eff, err
+
+    def efficiencies_fit(self, edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        # Get center of bins
+        dx = (edges[1] - edges[0]) * 0.5
+        x = edges[:-1] + dx
+        # Get the fit values
+        py, pyerr, px = self.fit_results()
+        # Fit a third order polynomial to the fit values
+        try:
+            from iminuit import Minuit
+            from iminuit.cost import LeastSquares
+            from numba_stats import bernstein
+            from jacobi import propagate
+
+        except ImportError:
+            raise ImportError("iminuit and numba-stats is required for fitting.")
+
+        # Prepare the fit
+        def model(x, *par):
+            return bernstein.density(x, par, px[0], px[-1])
+
+        cost = LeastSquares(px, py, pyerr, model)
+        m = Minuit(cost, (1, 1, 1, 1, 1), name=("a0", "a1", "a2", "a3", "a4"))
+        m.limits["a0", "a1", "a2", "a3", "a4"] = (0, None)
+        m.migrad()
+        if not m.valid:
+            try:
+                m.interactive()
+            except ImportError:
+                raise ImportError("PySide6 is required for fit debugging.")
+        # Get the efficiency values and uncertainties
+        eff, err = propagate(lambda par: model(x, *par), m.values, m.covariance)
+        err = np.sqrt(np.diag(err))
         # Set values outside the interpolation range to 0
         eff[x < px[0]] = 0
         eff[x > px[-1]] = 0
@@ -618,8 +664,8 @@ class QEffScan(Scan):
         return py[sort] / py.max(), pyerr[sort] / py.max(), px[sort]
 
     def fit_highest_peak(self) -> None:
-        edges = np.histogram([], bins=1024, range=(0, 1))[1]
-        fit_range = 25
+        edges = np.histogram([], bins=512, range=(0, 1))[1]
+        fit_range = 20
         for i in range(len(self.steps)):
             # Prepare data
             spec, err = self.spectra[i].spectrum(edges, roi=self.roi)
@@ -629,10 +675,17 @@ class QEffScan(Scan):
             xe = edges[peak-fit_range:peak+fit_range+1]
             n = np.stack((spec, err**2), axis=-1)
             # Peform the fit
-            self._fit_peak(i, n, xe)
+            m = self._fit_peak(i, n, xe)
+            if not m.valid:
+                try:
+                    m.interactive()
+                except ImportError:
+                    raise ImportError("PySide6 is required for fit debugging.")
+                else:
+                    self._add_fit_result(i, m.values["s"], m.errors["s"], m.values["loc"])
 
     def _fit_in_range(self, i: int, fit_range: Tuple[float, float]) -> None:
-        edges = np.histogram([], bins=1024, range=(0, 1))[1]
+        edges = np.histogram([], bins=512, range=(0, 1))[1]
         # Prepare data
         spec, err = self.spectra[i].spectrum(edges, roi=self.roi)
         peak = np.argwhere((edges > fit_range[0]) & (edges < fit_range[1])).flatten()
@@ -648,30 +701,37 @@ class QEffScan(Scan):
         try:
             from iminuit import Minuit
             from iminuit.cost import ExtendedBinnedNLL
-            from numba_stats import norm, voigt
+            from numba_stats import norm, voigt, crystalball_ex
 
         except ImportError:
             raise ImportError("iminuit and numba-stats is required for fitting.")
 
         # Prepare the fit
         if self.model == "gaussian":
-            def model(x, s, loc, scale):
-                return s * norm.cdf(x, loc, scale)
+            def model(x, *par):
+                return par[0] * norm.cdf(x, *par[1:])
 
             start = (n.max(), (xe[-1] + xe[0]) * 0.5, 0.01)
             limits = {"s": (0, None), "loc": (xe[0], xe[-1]), "scale": (0.0001, 0.1)}
             use_pdf = ''
         elif self.model == "voigt":
-            def model(x, s, gamma, loc, scale):
-                return s * voigt.pdf(x, gamma, loc, scale)
+            def model(x, *par):
+                return par[0] * voigt.pdf(x, *par[1:])
 
             start = (n.max(), 0.01, (xe[-1] + xe[0]) * 0.5, 0.01)
             limits = {"s": (0, None), "gamma": (0.0001, 0.1), "loc": (xe[0], xe[-1]), "scale": (0.0001, 0.1)}
             use_pdf = "numerical"
+        elif self.model == "crystalball":
+            def model(x, *par):
+                return par[0] * crystalball_ex.cdf(x, *par[1:])
+
+            start = (n.max(), 1, 1.5, 0.01, 1, 1.5, 0.01, (xe[-1] + xe[0]) * 0.5)
+            limits = {"s": (0, None), "beta_left": (0, 5), "m_left": (1, 20), "scale_left": (0.0001, 0.1), "beta_right": (0, 5), "m_right": (1, 20), "scale_right": (0.0001, 0.1), "loc": (xe[0], xe[-1])}
+            use_pdf = ''
         else:
             raise ValueError("Invalid model.")
         cost = ExtendedBinnedNLL(n, xe, model, use_pdf=use_pdf)
-        m = Minuit(cost, *start)
+        m = Minuit(cost, *start, name=limits.keys())
         for par in limits:
             m.limits[par] = limits[par]
         # Perform the fit
