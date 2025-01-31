@@ -115,7 +115,7 @@ class QEffViewer(AGEScanViewer):
         if self.view_results.isChecked():
             with ageplot.context(["age", "dataviewer"]):
                 self.ax.clear()
-                self.scan.plot_eff(self.ax)
+                self.scan.plot_eff(self.ax, color=ageplot.colors[0])
                 self.canvas.draw()
         else:
             self.plot(self.step)
@@ -134,7 +134,6 @@ class PhexViewer(AGEDataViewer):
         self.reference = reference
         self.qnum = qnum
         self.simulation = simulation
-        self.assignments = {}
         super().__init__()
         # Add emtpy figure
         self.add_plot()
@@ -149,10 +148,7 @@ class PhexViewer(AGEDataViewer):
         # Prepare the data
         self.y, self.yerr, self.x = self.scan.counts()
         self.ymax = np.max(self.y)
-        # Prepare the assignment fit data for plotting
-        self.x_fit = np.linspace(self.x[0], self.x[-1], len(self.x) * 100)
-        self.y_fit = np.zeros_like(self.x_fit)
-        self.yerr_fit = np.zeros_like(self.x_fit)
+        self.ymin = np.min(self.y)
         # Set the x limit
         self.dx = energy_range
         self.xlim = (self.x[0], self.x[0] + self.dx)
@@ -165,10 +161,11 @@ class PhexViewer(AGEDataViewer):
         x = self.x[in_range]
         y = self.y[in_range]
         yerr = self.yerr[in_range]
-        in_range = (self.x_fit >= self.xlim[0]) & (self.x_fit <= self.xlim[1])
-        x_fit = self.x_fit[in_range]
-        y_fit = self.y_fit[in_range]
-        yerr_fit = self.yerr_fit[in_range]
+        in_range = ((self.scan._counts_fit_x >= self.xlim[0])
+                    & (self.scan._counts_fit_x <= self.xlim[1]))
+        x_fit = self.scan._counts_fit_x[in_range]
+        y_fit = self.scan._counts_fit_y[in_range]
+        yerr_fit = self.scan._counts_fit_yerr[in_range]
         with ageplot.context(["age", "dataviewer"]):
             # Clear the plot
             self.ax.clear()
@@ -194,7 +191,7 @@ class PhexViewer(AGEDataViewer):
             self.ax.fill_between(x_fit, y_fit - yerr_fit, y_fit + yerr_fit,
                                 color=ageplot.colors[1], alpha=0.5)
             self.ax.set_xlim(self.xlim)
-            self.ax.set_ylim(top=self.ymax * 1.05)
+            self.ax.set_ylim(self.ymin * 0.99, self.ymax * 1.05)
             self.ax.set_xlabel("Energy [eV]")
             self.ax.set_ylabel(r"Counts [arb.$\,$u.]")
             self.canvas.draw_idle()
@@ -247,32 +244,32 @@ class PhexViewer(AGEDataViewer):
         try:
             from iminuit import Minuit
             from iminuit.cost import LeastSquares
-            from numba_stats import norm, bernstein
+            from numba_stats import norm
 
         except ImportError:
             raise ImportError("iminuit and numba-stats is required for fitting.")
 
         # Prepare the fit
         def model(x, *par):
-            return par[0] * norm.pdf(x, *par[1:3]) + bernstein.density(x, par[3:], *xr)
+            return par[0] * norm.pdf(x, *par[1:3]) + par[3]
 
-        start = [np.max(y), (xr[0] + xr[1]) * 0.5, 0.01 * (xr[1] - xr[0]), 1, 1, 1, 1]
+        start = [
+            np.max(y) * (x[1] - x[0]),
+            (xr[0] + xr[1]) * 0.5,
+            0.1 * (xr[1] - xr[0]),
+            1
+        ]
         limits = {
             "s": (0, None),
             "loc": (xr[0], xr[1]),
             "scale": (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0])),
-            "a0": (0, None),
-            "a1": (0, None),
-            "a2": (0, None),
-            "a3": (0, None),
+            "c": (0, None),
         }
         cost = LeastSquares(x, y, yerr, model)
         m = Minuit(cost, *start, name=limits.keys())
         # Set the limits
         for par in limits:
             m.limits[par] = limits[par]
-        # Fix the higher order bernstein terms
-        m.fixed["a1", "a2", "a3"] = True
         # Fit the data
         m.migrad()
         # Debug the fit if it failed
@@ -298,19 +295,94 @@ class PhexViewer(AGEDataViewer):
             exc = dialog.get_input()
             val = np.array(m.values)
             cov = np.array(m.covariance)
-            self.assignments[tuple(exc)] = (val, cov)
+            self.scan.phex_assignments[tuple(exc)] = (val, cov)
             # Add the result to the fit data
-            in_range = (self.x_fit >= xr[0]) & (self.x_fit <= xr[1])
-            x_fit = self.x_fit[in_range]
-            self.y_fit[in_range] = model(x_fit, *val)
+            in_range = (self.scan._counts_fit_x >= xr[0]) & (self.scan._counts_fit_x <= xr[1])
+            x_fit = self.scan._counts_fit_x[in_range]
+            self.scan._counts_fit_y[in_range] = model(x_fit, *val)
             try:
                 from jacobi import propagate
 
             except ImportError:
                 warnings.warn("jacobi not installed, fit uncertainty is not plotted.")
-                self.yerr_fit[in_range] = 0
+                self.scan._counts_fit_yerr[in_range] = 0
             else:
                 _, yerr_fit = propagate(lambda par: model(x_fit, *par), val, cov)
-                self.yerr_fit[in_range] = np.sqrt(np.diag(yerr_fit))
+                self.scan._counts_fit_yerr[in_range] = np.sqrt(np.diag(yerr_fit))
             # Update the plot
             self.plot()
+
+
+class PhemViewer(AGEDataViewer):
+    def __init__(self,
+        scan: EnergyScan,
+        reference: pd.DataFrame,
+        qnum: Sequence[str],
+        wl_range: Tuple[float, float],
+        simulation: pd.DataFrame,
+    ) -> None:
+        super().__init__()
+        self.scan = scan
+        self.reference = reference
+        self.qnum = qnum
+        self.wl_range = wl_range
+        self.simulation = simulation
+        # Add emtpy figure
+        self.add_plot()
+        # Add the toolbar
+        self.add_toolbar()
+        # Add rectangle selector
+        self.add_rect_selector(self.ax, self.assign, interactive=False, hint="Assign Peak")
+        # Add Forward and Backward buttons
+        self.add_forward_backward_action(self.prev, self.next)
+        # Add Look-Up button
+        self.add_lookup_action(self.look_up)
+        # Current index
+        self.phex = list(self.scan.phex_assignments.keys())
+        self.idx = 0
+        # Define bins
+        self.edges = np.histogram([], bins=512, range=(0, 1))[1]
+        # Plot the first spectrum
+        self.plot()
+
+    def plot(self):
+        with ageplot.context(["age", "dataviewer"]):
+            self.ax.clear()
+            spec, err = self.scan.assigned_spectrum(
+                self.phex[self.idx], self.edges, calib=False)
+            self.ax.stairs(spec, self.edges, color=ageplot.colors[1])
+            xlim = (self.scan.roi["x"]["min"], self.scan.roi["x"]["max"])
+            self.ax.set_xlim(*xlim)
+            self.ax.set_ylim(0, np.max(spec) * 1.1)
+            self.ax.set_title(f"{self.phex[self.idx]}")
+            # Plot simulated spectrum
+            if self.simulation is not None:
+                x = np.linspace(*self.wl_range, 1000)
+                y = self.simulation.spectrum(self.phex[self.idx], x, 0.01, "nm")
+                y = y / np.max(y) * np.max(spec)
+                # Scale x to xlim
+                x = xlim[0] + (xlim[1] - xlim[0]) * (x - self.wl_range[0]) / (self.wl_range[1] - self.wl_range[0])
+                self.ax.plot(x, y, color=ageplot.colors[0])
+            self.canvas.draw_idle()
+
+    def next(self):
+        if self.idx + 1 >= len(self.phex):
+            return
+        self.idx += 1
+        self.plot()
+
+    def prev(self):
+        if self.idx - 1 < 0:
+            return
+        self.idx -= 1
+        self.plot()
+
+    def look_up(self):
+        pass
+
+    def assign(self, eclick: MouseEvent, erelease: MouseEvent):
+        xr = (eclick.xdata, erelease.xdata)
+        pass
+
+    def on_fit_closed(self):
+        pass

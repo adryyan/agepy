@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import h5py
 
 from ._anodes import *
-from agepy.interactive.photons import AGEScanViewer, QEffViewer, PhexViewer
+from agepy.interactive.photons import AGEScanViewer, QEffViewer, PhexViewer, PhemViewer
 from agepy.interactive import AGEpp
 
 # Import modules for type hinting
@@ -154,8 +154,13 @@ class Spectrum:
         # Apply spatial detector efficiency correction
         if qeff is not None:
             eff, eff_err, xe = qeff
-            x_inds = np.digitize(det_image, xe)
-            eff = 1 / eff[x_inds]
+            x_inds = np.digitize(det_image, xe[1:])
+            # Get the inverse of the efficiency
+            eff = eff[x_inds]
+            eff_err = eff_err[x_inds]
+            nonzero = eff > 0
+            eff[nonzero] = 1 / eff[nonzero]
+            eff_err[nonzero] = eff_err[nonzero] / eff[nonzero]
         else:
             eff = np.ones(det_image.shape[0])
         # Convert x values to wavelengths
@@ -513,6 +518,12 @@ class EnergyScan(Scan):
     ) -> None:
         super().__init__(data_files, anode, energies, raw, time_per_step, roi,
                          target_density, intensity_upstream, **norm)
+        self._counts_fit_x = np.linspace(
+            self.steps[0], self.steps[-1], len(self.steps) * 100)
+        self._counts_fit_y = np.zeros_like(self._counts_fit_x)
+        self._counts_fit_yerr = np.zeros_like(self._counts_fit_x)
+        self.phex_assignments = {}
+        self.phem_assignments = {}
 
     @property
     def energies(self) -> np.ndarray:
@@ -522,7 +533,10 @@ class EnergyScan(Scan):
     def energies(self, value: np.ndarray) -> None:
         self.steps = value
 
-    def calibrate_energies(self,
+    def counts_fit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self._counts_fit_y, self._counts_fit_yerr, self._counts_fit_x
+
+    def assign_phex(self,
         reference: pd.DataFrame,
         qnum: Sequence[str],
         energy_range: float,
@@ -533,6 +547,53 @@ class EnergyScan(Scan):
         """
         app = AGEpp(PhexViewer, self, reference, qnum, energy_range, simulation)
         app.run()
+
+    def assign_phem(self,
+        reference: pd.DataFrame,
+        qnum: Sequence[str],
+        wl_range: Tuple[float, float],
+        simulation: pd.DataFrame = None,
+    ) -> None:
+        """Calibrate the exciting-photon energies.
+
+        """
+        app = AGEpp(PhemViewer, self, reference, qnum, wl_range, simulation)
+        app.run()
+
+    def assigned_spectrum(self,
+        phex: Tuple,
+        edges: np.ndarray,
+        qeff: bool = True,
+        bkg: bool = True,
+        calib: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get the spectrum with assigned energies.
+
+        """
+        if tuple(phex) not in self.phex_assignments:
+            raise ValueError("Phex assignment not found.")
+        val, cov = self.phex_assignments[tuple(phex)]
+        # Find clossest energy step
+        step_idx = np.argmin(np.abs(self.steps - val[1]))
+        # Get quantum efficiency
+        if qeff and self.qeff is not None:
+            xe = np.histogram([], bins=512, range=(0, 1))[1]
+            qeff = (*self.qeff.efficiencies(xe), xe)
+        else:
+            qeff = None
+        # Get background spectrum
+        if bkg and self.bkg is not None:
+            bkg = self.bkg
+        else:
+            bkg = None
+        # Get wavelength calibration
+        if calib and self.calib is not None:
+            calib = self.calib
+        else:
+            calib = None
+        # Return the spectrum
+        return self.spectra[step_idx].spectrum(
+            edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib)
 
 
 class QEffScan(Scan):
