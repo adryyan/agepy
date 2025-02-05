@@ -98,7 +98,7 @@ class Spectrum:
         # Apply spatial detector efficiency correction
         if qeff is not None:
             eff, eff_err, xe = qeff
-            x_inds = np.digitize(det_image[:,0], xe[1:])
+            x_inds = np.digitize(det_image[:,0], xe[1:-1])
             # Get the inverse of the efficiency
             eff = eff[x_inds]
             eff_err = eff_err[x_inds]
@@ -154,7 +154,7 @@ class Spectrum:
         # Apply spatial detector efficiency correction
         if qeff is not None:
             eff, eff_err, xe = qeff
-            x_inds = np.digitize(det_image, xe[1:])
+            x_inds = np.digitize(det_image, xe[1:-1])
             # Get the inverse of the efficiency
             eff = eff[x_inds]
             eff_err = eff_err[x_inds]
@@ -594,6 +594,62 @@ class EnergyScan(Scan):
         # Return the spectrum
         return self.spectra[step_idx].spectrum(
             edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib)
+
+    def phexphem(self,
+        xedges: np.ndarray = None,
+        yedges: np.ndarray = None,
+        qeff: bool = True,
+        bkg: bool = True,
+        calib: bool = True,
+    ) -> np.ndarray:
+        """
+        
+        """
+        if xedges is None:
+            dx = np.mean(np.diff(self.steps) * 0.5)
+            dec = -int(np.floor(np.log10(dx)))
+            dx = round(dx, dec)
+            xmin = round(np.min(self.steps), dec) - dx
+            xedges = np.arange(xmin, np.max(self.steps) + dx * 2, dx * 2)
+        # Get quantum efficiency
+        if qeff and self.qeff is not None:
+            xe = np.histogram([], bins=512, range=(0, 1))[1]
+            qeff = (*self.qeff.efficiencies(xe), xe)
+        else:
+            qeff = None
+        # Get background spectrum
+        if bkg and self.bkg is not None:
+            bkg = self.bkg
+        else:
+            bkg = None
+        # Get wavelength calibration
+        if calib and self.calib is not None:
+            calib = self.calib
+            if yedges is None:
+                yedges = np.histogram([], bins=512, range=(0, 1))[1]
+                yedges = calib[1] * yedges + calib[0]
+        else:
+            yedges = np.histogram([], bins=512, range=(0, 1))[1]
+            calib = None
+        # Create an empty map
+        hist = np.zeros((len(yedges) - 1, len(xedges) - 1))
+        # Fill the map
+        weights, _ = np.histogram(self.steps, bins=xedges)
+        if len(weights[weights > 1]) > 0:
+            warnings.warn("Multiple spectra found for the same energy.")
+        inds = np.digitize(self.steps, xedges[1:-1])
+        for spec, idx in zip(self.spectra, inds):
+            hist[:, idx] += spec.spectrum(
+                yedges,
+                roi=self.roi,
+                qeff=qeff,
+                background=bkg,
+                calib=calib,
+            )[0]
+        # Normalize the map
+        weights[weights == 0] = 1
+        hist /= weights
+        return hist, xedges, yedges
 
 
 class QEffScan(Scan):
