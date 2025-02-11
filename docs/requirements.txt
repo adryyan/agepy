@@ -40,7 +40,7 @@ notebook
 h5py
 
 # PyQt6 https://pypi.org/project/PyQt6/
-PyQt6
+PySide6
 
 # iminuit https://pypi.org/project/iminuit/
 iminuit

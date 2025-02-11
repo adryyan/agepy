@@ -458,24 +458,38 @@ class PhemViewer(AGEDataViewer):
         else:
             self.plot()
 
+    def _get_cdf(self, name: Sequence[str], xr: Tuple[float, float], y: np.ndarray):
+        # Import the model functions
+        try:
+            from numba_stats import norm, bernstein
+
+        except ImportError:
+            raise ImportError("numba-stats is required for fitting.")
+
+        start = []
+        limits = {}
+        cdf = []
+        for i, n in enumerate(name):
+            if name == "Gaussian":
+                start.append(np.max(y))
+                start.append(xr[0] + (xr[1] - xr[0]) * (i + 1) / (len(name) + 1))
+                start.append(0.1 * (xr[1] - xr[0]))
+                limits["s" + (i + 1)] = (0, np.sum(y))
+                limits["loc" + (i + 1)] = (xr[0], xr[1])
+                limits["scale" + (i + 1)] = (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0]))
+                cdf.append(lambda x, par: norm.cdf(x, *par))
+            elif name == "Bernstein1d":
+                start.extend([1, 1])
+                limits["b01"] = (0, None)
+                limits["b11"] = (0, None)
+                cdf.append(lambda x, par: bernstein.integral(x, par, xr[0], xr[1]))
+
+        def model(x, *par):
+            pass
+        return model, start, limits
+
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
         xr = (eclick.xdata, erelease.xdata)
-        # Let the user choose the fit model
-        signal_entries = ["Gaussian", "Voigt", "None"]
-        background_entries = ["None", "Bernstein1d", "Bernstein2d"]
-        dialog = FitSetupDialog(signal_entries, background_entries, self)
-        if dialog.exec():
-            sig, bkg = dialog.get_selected_entries()
-            print(sig, bkg)
-        else:
-            return
-        # Get the data in the selected range
-        spec, err = self.scan.assigned_spectrum(
-            self.phex[self.idx], self.edges, calib=False)
-        in_range = np.argwhere((self.edges >= xr[0]) & (self.edges <= xr[1])).flatten()
-        x = self.edges[in_range]
-        y = spec[in_range[:-1]]
-        yerr = err[in_range[:-1]]
         # Import the fitting modules
         try:
             from iminuit import Minuit
@@ -485,7 +499,29 @@ class PhemViewer(AGEDataViewer):
         except ImportError:
             raise ImportError("iminuit and numba-stats is required for fitting.")
 
+        # Let the user choose the fit model
+        signal_entries = ["Gaussian", "Voigt", "None"]
+        background_entries = ["None", "Constant", "Bernstein1d", "Bernstein2d", "Bernstein3d"]
+        dialog = FitSetupDialog(signal_entries, background_entries, self)
+        if dialog.exec():
+            sig_components, bkg_components = dialog.get_selected_entries()
+        else:
+            return
+
+        # Get the data in the selected range
+        spec, err = self.scan.assigned_spectrum(
+            self.phex[self.idx], self.edges, calib=False)
+        in_range = np.argwhere((self.edges >= xr[0]) & (self.edges <= xr[1])).flatten()
+        x = self.edges[in_range]
+        y = spec[in_range[:-1]]
+        yerr = err[in_range[:-1]]
+
         # Prepare the fit
+        if len(sig_components) == 0:
+            warnings.warn("No signal model selected.")
+            return
+        elif len(sig_components) == 1:
+            sig_model = self._get_cdf(sig_components[0])
         def model(x, *par):
             return (par[0] * norm.cdf(x, *par[1:3])
                     + par[3] * norm.cdf(x, *par[4:6])

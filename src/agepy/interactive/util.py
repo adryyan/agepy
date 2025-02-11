@@ -6,12 +6,7 @@ import warnings
 
 
 def import_qt_binding():
-    """Get the Qt binding that is available.
-
-    Returns
-    -------
-    str
-        The Qt binding that is available. Either "PySide6" or "PyQt6".
+    """Import the available Qt binding.
 
     """
     try:
@@ -28,3 +23,27 @@ def import_qt_binding():
             raise ImportError("No compatible Qt bindings found.")
 
     return qt_binding, QtWidgets, QtCore, QtGui
+
+def import_iminuit():
+    """Import iminuit if installed.
+
+    """
+    try:
+        from iminuit import Minuit, cost
+
+    except ImportError:
+        raise ImportError("iminuit not installed. Please install for fitting.")
+
+    return Minuit, cost
+
+def import_iminuit_interactive():
+    """Import iminuit interactive if installed.
+
+    """
+    try:
+        from iminuit.qtwidget import make_widget
+
+    except ImportError:
+        raise ImportError("iminuit>=2.31 not installed.")
+
+    return make_widget
