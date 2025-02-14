@@ -1,15 +1,19 @@
 from __future__ import annotations
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Dict
 import warnings
 from typing import TYPE_CHECKING
 import numpy as np
+from scipy.stats import norm as scipy_norm
 import pandas as pd
+from . util import import_qt_binding, import_jacobi_propagate
 # Import PySide6 / PyQt6 modules
-from . util import import_qt_binding
 qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
+# Import propagate from jacobi
+propagate = import_jacobi_propagate()
 # Import internal modules
 from agepy.interactive import AGEDataViewer
 from agepy.interactive.ui import PhexDialog, PhemDialog, FitSetupDialog
+from agepy.interactive.fitting import PhotonSpectrumFit, PhotonExcitationFit
 from agepy import ageplot
 # Import modules for type hinting
 if TYPE_CHECKING:
@@ -85,24 +89,12 @@ class QEffViewer(AGEScanViewer):
         x1, y1 = eclick.xdata, eclick.ydata
         x2, y2 = erelease.xdata, erelease.ydata
         # Fit in the selected region
-        m = self.scan._fit_in_range(self.step, (x1, x2))
-        if not m.valid:
-            try:
-                from iminuit.qtwidget import make_widget
-
-            except ImportError:
-                print("iminuit.qtwidget not installed")
-            else:
-                # Create the widget
-                self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
-                self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.step, m))
-                self.debug_fit.show()
-        else:
-            # Clear the selector
-            self.selector.clear()
-            # Go to the next plot
-            self.plot_next()
+        n, xe = self.scan._fit_in_range(self.step, (x1, x2))
+        # Create the widget
+        self.debug_fit = PhotonSpectrumFit(n, xe, sig=self.scan.model)
+        self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.step, self.debug_fit.m))
+        self.debug_fit.show()
 
     def on_fit_closed(self, step, m):
         # Clear the selector
@@ -126,13 +118,13 @@ class PhexViewer(AGEDataViewer):
     def __init__(self,
         scan: EnergyScan,
         reference: pd.DataFrame,
-        qnum: Sequence[str],
+        label: Dict,
         energy_range: float,
         simulation: pd.DataFrame,
     ) -> None:
         self.scan = scan
         self.reference = reference
-        self.qnum = qnum
+        self.label = label
         self.simulation = simulation
         super().__init__()
         # Add emtpy figure
@@ -146,9 +138,12 @@ class PhexViewer(AGEDataViewer):
         # Add Look-Up button
         self.add_lookup_action(self.look_up)
         # Prepare the data
-        self.y, self.yerr, self.x = self.scan.counts()
+        self.y, self.yerr, self.x = self.scan.counts(qeff=False)
         self.ymax = np.max(self.y)
         self.ymin = np.min(self.y)
+        # Prepare assignments
+        if self.scan.phex_assignments is None:
+            self.scan.phex_assignments = pd.DataFrame(columns=["E", *self.label, "val", "err"])
         # Set the x limit
         self.dx = energy_range
         self.xlim = (self.x[0], self.x[0] + self.dx)
@@ -161,11 +156,6 @@ class PhexViewer(AGEDataViewer):
         x = self.x[in_range]
         y = self.y[in_range]
         yerr = self.yerr[in_range]
-        in_range = ((self.scan._counts_fit_x >= self.xlim[0])
-                    & (self.scan._counts_fit_x <= self.xlim[1]))
-        x_fit = self.scan._counts_fit_x[in_range]
-        y_fit = self.scan._counts_fit_y[in_range]
-        yerr_fit = self.scan._counts_fit_yerr[in_range]
         with ageplot.context(["age", "dataviewer"]):
             # Clear the plot
             self.ax.clear()
@@ -181,15 +171,25 @@ class PhexViewer(AGEDataViewer):
                     "E <= @self.xlim[1]")
             for i, row in ref.iterrows():
                 self.ax.axvline(row["E"], color="black", linestyle="--")
-                text = f"{row[self.qnum[0]]}"
-                for q in self.qnum[1:]:
-                    text += f",{row[q]}"
+                text = ""
+                for l in self.label:
+                    if l in row:
+                        text += f"{row[l]},"
+                text = text[:-1]
                 self.ax.text(row["E"] + 0.0002, self.ymax, text, ha="left",
                              va="top", rotation=90)
             # Plot the assignments
-            self.ax.plot(x_fit, y_fit, color=ageplot.colors[1])
-            self.ax.fill_between(x_fit, y_fit - yerr_fit, y_fit + yerr_fit,
-                                color=ageplot.colors[1], alpha=0.5)
+            fit = self.scan.phex_assignments.query(
+                "E >= @self.xlim[0]").query("E <= @self.xlim[1]")
+            x_fit = np.linspace(self.xlim[0], self.xlim[1], 1000)
+            for i, row in fit.iterrows():
+                val = row["val"]
+                err = row["err"]
+                y_fit, yerr_fit = propagate(lambda par: par[0] * scipy_norm.pdf(x_fit, *par[1:]), val, err**2)
+                yerr_fit = np.sqrt(np.diag(yerr_fit))
+                self.ax.plot(x_fit, y_fit, color=ageplot.colors[1])
+                self.ax.fill_between(x_fit, y_fit - yerr_fit, y_fit + yerr_fit,
+                                     color=ageplot.colors[1], alpha=0.5)
             self.ax.set_xlim(self.xlim)
             self.ax.set_ylim(self.ymin * 0.99, self.ymax * 1.05)
             self.ax.set_xlabel("Energy [eV]")
@@ -213,15 +213,15 @@ class PhexViewer(AGEDataViewer):
         self.plot()
 
     def look_up(self):
-        dialog = PhexDialog(self)
+        dialog = PhexDialog(self, self.label, title="Look-Up")
         if dialog.exec():
             exc = dialog.get_input()
             if self.simulation is not None:
                 E = self.simulation.copy()
             else:
                 E = self.reference.copy()
-            for q, val in zip(self.qnum, exc):
-                query_str = f"{q} == @val"
+            for l, val in exc.items():
+                query_str = f"{l} == @val"
                 E.query(query_str, inplace=True)
             if E.empty:
                 return
@@ -235,82 +235,69 @@ class PhexViewer(AGEDataViewer):
 
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
         xr = (eclick.xdata, erelease.xdata)
+
         # Get the data in the selected range
         in_range = (self.x >= xr[0]) & (self.x <= xr[1])
         x = self.x[in_range]
         y = self.y[in_range]
         yerr = self.yerr[in_range]
-        # Import the fitting modules
-        try:
-            from iminuit import Minuit
-            from iminuit.cost import LeastSquares
-            from numba_stats import norm
 
-        except ImportError:
-            raise ImportError("iminuit and numba-stats is required for fitting.")
-
-        # Prepare the fit
-        def model(x, *par):
-            return par[0] * norm.pdf(x, *par[1:3]) + par[3]
-
-        start = [
-            np.max(y) * (x[1] - x[0]),
-            (xr[0] + xr[1]) * 0.5,
-            0.1 * (xr[1] - xr[0]),
-            1
-        ]
-        limits = {
-            "s": (0, None),
-            "loc": (xr[0], xr[1]),
-            "scale": (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0])),
-            "c": (0, None),
-        }
-        cost = LeastSquares(x, y, yerr, model)
-        m = Minuit(cost, *start, name=limits.keys())
-        # Set the limits
-        for par in limits:
-            m.limits[par] = limits[par]
-        # Fit the data
-        m.migrad()
-        # Debug the fit if it failed
-        if not m.valid:
-            try:
-                from iminuit.qtwidget import make_widget
-
-            except ImportError:
-                print("iminuit.qtwidget not installed")
-            else:
-                # Create the widget
-                self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
-                self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(m, model, xr))
-                self.debug_fit.show()
-        else:
-            self.on_fit_closed(m, model, xr)
-
-    def on_fit_closed(self, m, model, xr):
-        self.debug_fit = None
-        dialog = PhexDialog(self)
+        # Get the assignments
+        dialog = PhexDialog(self, self.label, title="Assign Peak 1")
         if dialog.exec():
-            exc = dialog.get_input()
-            val = np.array(m.values)
-            cov = np.array(m.covariance)
-            self.scan.phex_assignments[tuple(exc)] = (val, cov)
-            # Add the result to the fit data
-            in_range = (self.scan._counts_fit_x >= xr[0]) & (self.scan._counts_fit_x <= xr[1])
-            x_fit = self.scan._counts_fit_x[in_range]
-            self.scan._counts_fit_y[in_range] = model(x_fit, *val)
-            try:
-                from jacobi import propagate
-
-            except ImportError:
-                warnings.warn("jacobi not installed, fit uncertainty is not plotted.")
-                self.scan._counts_fit_yerr[in_range] = 0
+            exc1 = dialog.get_input()
+        else:
+            return
+        dialog = PhexDialog(self, self.label, title="Assign Peak 2")
+        if dialog.exec():
+            exc2 = dialog.get_input()
+            E1 = self.reference.copy()
+            for l, val in exc1.items():
+                query_str = f"{l} == @val"
+                E1.query(query_str, inplace=True)
+            E2 = self.reference.copy()
+            for l, val in exc2.items():
+                query_str = f"{l} == @val"
+                E2.query(query_str, inplace=True)
+            if E1.empty or E2.empty:
+                constraint = None
             else:
-                _, yerr_fit = propagate(lambda par: model(x_fit, *par), val, cov)
-                self.scan._counts_fit_yerr[in_range] = np.sqrt(np.diag(yerr_fit))
-            # Update the plot
-            self.plot()
+                constraint = (np.abs(E2["E"].iloc[0] - E1["E"].iloc[0]), 0.0005)
+            self.debug_fit = PhotonExcitationFit(y, yerr, x, sig=["Gaussian", "Gaussian"], bkg="Constant", constrain_dE=constraint)
+        else:
+            exc2 = None
+            self.debug_fit = PhotonExcitationFit(y, yerr, x, sig="Gaussian", bkg="Constant")
+
+        # Fit the data
+        self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.debug_fit.m, exc1, exc2))
+        self.debug_fit.show()
+
+    def on_fit_closed(self, m, exc1, exc2):
+        exc1["E"] = float(m.values["loc1"])
+        exc1["val"] = np.array(m.values["s1", "loc1", "scale1"])
+        exc1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
+        idx = self.scan.phex_assignments.index.max()
+        if np.isnan(idx):
+            idx = -1
+        self.scan.phex_assignments.loc[idx + 1] = exc1
+        if exc2 is not None:
+            if "loc2" in m.parameters:
+                exc2["E"] = float(m.values["loc2"])
+                exc2["val"] = np.array(m.values["s2", "loc2", "scale2"])
+                exc2["err"] = np.array(m.errors["s2", "loc2", "scale2"])
+            else:
+                cov = np.array(m.covariance)
+                inds = [m.parameters.index(p) for p in ["loc1", "loc2_loc1"]]
+                cov = cov[np.ix_(inds, inds)]
+                loc2, loc2err = propagate(lambda par: par[0] + par[1], m.values["loc1", "loc2_loc1"], cov)
+                exc2["E"] = loc2
+                exc2["val"] = np.array([m.values["s2"], loc2, m.values["scale1"]])
+                exc2["err"] = np.array([m.errors["s2"], loc2err, m.errors["scale1"]])
+            self.scan.phex_assignments.loc[idx + 2] = exc2
+        # Update the plot
+        self.plot()
+        self.debug_fit = None
 
 
 class PhemViewer(AGEDataViewer):
@@ -363,22 +350,22 @@ class PhemViewer(AGEDataViewer):
             self.ax.set_title(f"{self.phex[self.idx]}")
             # Plot reference
             exc = self.phex[self.idx]
-            ref = self.reference.query("E >= @self.wl_range[0]").query(
-                "E <= @self.wl_range[1]").query("El == @exc[0]").query(
+            ref = self.reference.query("E >= 130").query(
+                "E <= 170").query("El == @exc[0]").query(
                     "vp == @exc[1]").query("Jp == @exc[2]")
             for i, row in ref.iterrows():
-                x = xlim[0] + (xlim[1] - xlim[0]) * (row["E"] - self.wl_range[0]) / (self.wl_range[1] - self.wl_range[0])
+                x = row["E"] * self.wl_range[1] + self.wl_range[0]
                 self.ax.axvline(x, color="black", linestyle="--")
                 text = f"{row["vpp"]},{row["Jpp"]}"
                 self.ax.text(x + 0.0002, np.max(spec), text, ha="left",
                              va="top", rotation=90)
             # Plot simulated spectrum
             if self.simulation is not None:
-                x = np.linspace(*self.wl_range, 1000)
+                x = np.linspace(135, 170, 1000)
                 y = self.simulation.spectrum(self.phex[self.idx], x, 0.01, "nm")
                 y = y / np.max(y) * np.max(spec)
                 # Scale x to xlim
-                x = xlim[0] + (xlim[1] - xlim[0]) * (x - self.wl_range[0]) / (self.wl_range[1] - self.wl_range[0])
+                x = x * self.wl_range[1] + self.wl_range[0]
                 self.ax.plot(x, y, color=ageplot.colors[0])
             self.canvas.draw_idle()
 
@@ -443,12 +430,13 @@ class PhemViewer(AGEDataViewer):
                 a0_start = fit_wl[0,0] - a1_start * calib_wl[0]
                 m = Minuit(cost, a0=a0_start, a1=a1_start)
                 m.migrad()
+                print(m)
                 self.ax.errorbar(calib_wl, fit_wl[:,0], yerr=fit_wl[:,1],
                     fmt="s", color=ageplot.colors[0], markersize=1.5,
                     label="Assign. Phex")
                 self.ax.plot(calib_wl, cost.prediction(m.values),
                     color=ageplot.colors[1], label="Lin. Regr.")
-                chi2ndof = m.fval / m.ndof
+                chi2ndof = m.fmin.reduced_chi2
                 self.ax.legend(title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}")
                 self.canvas.draw()
                 a0, a1 = m.values["a0"], m.values["a1"]
@@ -458,56 +446,8 @@ class PhemViewer(AGEDataViewer):
         else:
             self.plot()
 
-    def _get_cdf(self, name: Sequence[str], xr: Tuple[float, float], y: np.ndarray):
-        # Import the model functions
-        try:
-            from numba_stats import norm, bernstein
-
-        except ImportError:
-            raise ImportError("numba-stats is required for fitting.")
-
-        start = []
-        limits = {}
-        cdf = []
-        for i, n in enumerate(name):
-            if name == "Gaussian":
-                start.append(np.max(y))
-                start.append(xr[0] + (xr[1] - xr[0]) * (i + 1) / (len(name) + 1))
-                start.append(0.1 * (xr[1] - xr[0]))
-                limits["s" + (i + 1)] = (0, np.sum(y))
-                limits["loc" + (i + 1)] = (xr[0], xr[1])
-                limits["scale" + (i + 1)] = (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0]))
-                cdf.append(lambda x, par: norm.cdf(x, *par))
-            elif name == "Bernstein1d":
-                start.extend([1, 1])
-                limits["b01"] = (0, None)
-                limits["b11"] = (0, None)
-                cdf.append(lambda x, par: bernstein.integral(x, par, xr[0], xr[1]))
-
-        def model(x, *par):
-            pass
-        return model, start, limits
-
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
         xr = (eclick.xdata, erelease.xdata)
-        # Import the fitting modules
-        try:
-            from iminuit import Minuit
-            from iminuit.cost import ExtendedBinnedNLL
-            from numba_stats import norm, bernstein
-
-        except ImportError:
-            raise ImportError("iminuit and numba-stats is required for fitting.")
-
-        # Let the user choose the fit model
-        signal_entries = ["Gaussian", "Voigt", "None"]
-        background_entries = ["None", "Constant", "Bernstein1d", "Bernstein2d", "Bernstein3d"]
-        dialog = FitSetupDialog(signal_entries, background_entries, self)
-        if dialog.exec():
-            sig_components, bkg_components = dialog.get_selected_entries()
-        else:
-            return
-
         # Get the data in the selected range
         spec, err = self.scan.assigned_spectrum(
             self.phex[self.idx], self.edges, calib=False)
@@ -516,74 +456,26 @@ class PhemViewer(AGEDataViewer):
         y = spec[in_range[:-1]]
         yerr = err[in_range[:-1]]
 
-        # Prepare the fit
-        if len(sig_components) == 0:
-            warnings.warn("No signal model selected.")
-            return
-        elif len(sig_components) == 1:
-            sig_model = self._get_cdf(sig_components[0])
-        def model(x, *par):
-            return (par[0] * norm.cdf(x, *par[1:3])
-                    + par[3] * norm.cdf(x, *par[4:6])
-                    + bernstein.integral(x, par[6:], x[0], x[-1]))
-
-        start = [
-            np.max(y),
-            xr[0] + 0.33 * (xr[1] - xr[0]),
-            0.1 * (xr[1] - xr[0]),
-            np.max(y),
-            xr[1] - 0.33 * (xr[1] - xr[0]),
-            0.1 * (xr[1] - xr[0]),
-            1, 1, 1, 1
-        ]
-        limits = {
-            "s1": (0, np.sum(y)),
-            "loc1": (xr[0], xr[1]),
-            "scale1": (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0])),
-            "s2": (0, np.sum(y)),
-            "loc2": (xr[0], xr[1]),
-            "scale2": (0.001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0])),
-            "b03": (0, None),
-            "b13": (0, None),
-            "b23": (0, None),
-            "b33": (0, None),
-        }
-        cost = ExtendedBinnedNLL(np.stack((y, yerr**2), axis=-1), x, model)
-        m = Minuit(cost, *start, name=limits.keys())
-        # Set the limits
-        for par in limits:
-            m.limits[par] = limits[par]
         # Fit the data
-        #m.migrad()
-        # Debug the fit if it failed
-        #if not m.valid:
-        if True:
-            try:
-                from iminuit.qtwidget import make_widget
-
-            except ImportError:
-                print("iminuit.qtwidget not installed")
-            else:
-                # Create the widget
-                self.debug_fit = make_widget(m, m._visualize(None), {}, False, False)
-                self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(m))
-                self.debug_fit.show()
-        else:
-            self.on_fit_closed(m)
+        n = np.stack((y, yerr**2), axis=-1)
+        self.debug_fit = PhotonSpectrumFit(n, x, sig=["Gaussian", "Gaussian"], bkg="Constant")
+        self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.debug_fit.m))
+        self.debug_fit.show()
 
     def on_fit_closed(self, m):
         self.debug_fit = None
         dialog = PhemDialog(self)
         if dialog.exec():
+            loc = "loc" if "loc" in m.parameters else "loc1"
             phem = tuple(dialog.get_input())
             phex = tuple(self.phex[self.idx])
             if phex in self.scan.phem_assignments:
-                self.scan.phem_assignments[phex][phem] = (m.values["loc1"], m.errors["loc1"])
+                self.scan.phem_assignments[phex][phem] = (m.values[loc], m.errors[loc])
             else:
-                self.scan.phem_assignments[phex] = {phem: (m.values["loc1"], m.errors["loc1"])}
+                self.scan.phem_assignments[phex] = {phem: (m.values[loc], m.errors[loc])}
         dialog = PhemDialog(self)
-        if dialog.exec():
+        if dialog.exec() and "loc2" in m.parameters:
             phem = tuple(dialog.get_input())
             phex = tuple(self.phex[self.idx])
             if phex in self.scan.phem_assignments:

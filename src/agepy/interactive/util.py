@@ -47,3 +47,15 @@ def import_iminuit_interactive():
         raise ImportError("iminuit>=2.31 not installed.")
 
     return make_widget
+
+def import_jacobi_propagate():
+    """Import iminuit interactive if installed.
+
+    """
+    try:
+        from jacobi import propagate
+
+    except ImportError:
+        raise ImportError("jacobi not installed for error propagation.")
+
+    return propagate

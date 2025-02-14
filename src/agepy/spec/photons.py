@@ -311,6 +311,7 @@ class BaseScan:
 
     def counts(self,
         roi: dict = None,
+        qeff: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get the photon-excitation energy spectrum.
 
@@ -328,7 +329,7 @@ class BaseScan:
         """
         if roi is None:
             roi = self.roi
-        if self.qeff is None:
+        if self.qeff is None or not qeff:
             qeff = None
         else:
             edges = np.histogram([], bins=512, range=(0, 1))[1]
@@ -518,11 +519,7 @@ class EnergyScan(Scan):
     ) -> None:
         super().__init__(data_files, anode, energies, raw, time_per_step, roi,
                          target_density, intensity_upstream, **norm)
-        self._counts_fit_x = np.linspace(
-            self.steps[0], self.steps[-1], len(self.steps) * 100)
-        self._counts_fit_y = np.zeros_like(self._counts_fit_x)
-        self._counts_fit_yerr = np.zeros_like(self._counts_fit_x)
-        self.phex_assignments = {}
+        self.phex_assignments = None
         self.phem_assignments = {}
 
     @property
@@ -547,6 +544,14 @@ class EnergyScan(Scan):
         """
         app = AGEpp(PhexViewer, self, reference, qnum, energy_range, simulation)
         app.run()
+
+    def save_phex(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self.phex_assignments, f)
+
+    def load_phex(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self.phex_assignments = pickle.load(f)
 
     def assign_phem(self,
         reference: pd.DataFrame,
@@ -718,12 +723,12 @@ class QEffScan(Scan):
         eff = np.mean(eff_samples, axis=0)
         err = np.std(eff_samples, axis=0)
         # Calculate the distance to the closest value in px for each value in x
-        distances = np.abs(x[:, np.newaxis] - px[np.newaxis, :])
-        min_distances = np.min(distances, axis=1)
+        #distances = np.abs(x[:, np.newaxis] - px[np.newaxis, :])
+        #min_distances = np.min(distances, axis=1)
         # Add a penalty term dependend on the distance to the closest value
         # This is kinda arbitrary and one should think about a better way to
         # penalize interpolated values that are far away from the fit values
-        err += err * min_distances * 100
+        #err += err * min_distances * 100
         # Set values outside the interpolation range to 0
         eff[x < px[0]] = 0
         eff[x > px[-1]] = 0
@@ -811,40 +816,47 @@ class QEffScan(Scan):
         xe = edges[peak]
         n = np.stack((spec, err**2), axis=-1)
         # Peform the fit
-        return self._fit_peak(i, n, xe)
+        return n, xe
 
 
     def _fit_peak(self, i: int, n: np.ndarray, xe: np.ndarray) -> None:
         try:
             from iminuit import Minuit
             from iminuit.cost import ExtendedBinnedNLL
-            from numba_stats import norm, voigt, crystalball_ex
+            from numba_stats import norm, voigt, crystalball_ex, qgaussian
 
         except ImportError:
             raise ImportError("iminuit and numba-stats is required for fitting.")
 
         # Prepare the fit
-        if self.model == "gaussian":
+        if self.model == "Gaussian":
             def model(x, *par):
                 return par[0] * norm.cdf(x, *par[1:])
 
             start = (n.max(), (xe[-1] + xe[0]) * 0.5, 0.01)
             limits = {"s": (0, None), "loc": (xe[0], xe[-1]), "scale": (0.0001, 0.1)}
-            use_pdf = ''
-        elif self.model == "voigt":
+            use_pdf = ""
+        elif self.model == "Voigt":
             def model(x, *par):
                 return par[0] * voigt.pdf(x, *par[1:])
 
             start = (n.max(), 0.01, (xe[-1] + xe[0]) * 0.5, 0.01)
             limits = {"s": (0, None), "gamma": (0.0001, 0.1), "loc": (xe[0], xe[-1]), "scale": (0.0001, 0.1)}
             use_pdf = "numerical"
-        elif self.model == "crystalball":
+        elif self.model == "CrystalballEx":
             def model(x, *par):
                 return par[0] * crystalball_ex.cdf(x, *par[1:])
 
             start = (n.max(), 1, 1.5, 0.01, 1, 1.5, 0.01, (xe[-1] + xe[0]) * 0.5)
             limits = {"s": (0, None), "beta_left": (0, 5), "m_left": (1, 20), "scale_left": (0.0001, 0.1), "beta_right": (0, 5), "m_right": (1, 20), "scale_right": (0.0001, 0.1), "loc": (xe[0], xe[-1])}
-            use_pdf = ''
+            use_pdf = ""
+        elif self.model == "Q-Gaussian":
+            def model(x, *par):
+                return par[0] * qgaussian.cdf(x, *par[1:])
+
+            start = (n.max(), 1.5, (xe[-1] + xe[0]) * 0.5, 0.01)
+            limits = {"s": (0, None), "q": (1, 3), "loc": (xe[0], xe[-1]), "scale": (0.0001, 0.1)}
+            use_pdf = ""
         else:
             raise ValueError("Invalid model.")
         cost = ExtendedBinnedNLL(n, xe, model, use_pdf=use_pdf)
