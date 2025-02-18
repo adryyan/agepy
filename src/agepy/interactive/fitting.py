@@ -13,6 +13,7 @@ import numpy as np
 from numba_stats import (
     bernstein,
     truncnorm,
+    norm,
     truncexpon,
     uniform,
     voigt,
@@ -29,6 +30,7 @@ from jax.scipy.stats import expon as jexpon
 from resample.bootstrap import variance as bvar
 from jacobi import propagate
 # Import modules for type hints
+import matplotlib.pyplot as plt
 if TYPE_CHECKING:
     from typing import Sequence, Tuple, Dict, Union
     from matplotlib.axes import Axes
@@ -474,6 +476,7 @@ class PhotonExcitationFit(Fit2Signals1Background):
         y: NDArray,
         yerr: NDArray,
         x: NDArray,
+        xerr: NDArray,
         sig: Union[str, Tuple[str, str]] = "Gaussian",
         bkg: str = "Constant",
         constrain_dE: Tuple[float, float] = None,
@@ -483,6 +486,7 @@ class PhotonExcitationFit(Fit2Signals1Background):
         self.y = y
         self.yerr = yerr
         self.x = x
+        self.xerr = xerr
         self.sinit = np.max(y) * (x[1] - x[0])
         self.smax = np.max(y) * (x[1] - x[0]) * 5
         self.constrain_dE = constrain_dE
@@ -490,28 +494,13 @@ class PhotonExcitationFit(Fit2Signals1Background):
         super().__init__((x[0], x[-1]), sig=sig, bkg=bkg, parent=parent)
 
     def prepare_fit(self) -> None:
-        sig2 = self.sig_comp2.currentText()
         # Remember current parameters and limits
         _params_prev = self.params.copy()
-        # Initialize the signal and background models
-        _model1, _i1, _j1, _params1, _limits1 = self.sig_models["Gaussian"]()
-        _params1 = {f"{k}1": v for k, v in _params1.items()}
-        _limits1 = {f"{k}1": v for k, v in _limits1.items()}
-        idx1 = len(_params1)
-        _model3, _i3, _j3, _params3, _limits3 = self.bkg_models["Constant"]()
         nconstraint = None
-        if sig2 == "None":
-            # Combine the parameters and limits
-            self.params = dict(_params1, **_params3)
-            self.limits = dict(_limits1, **_limits3)
-            # Define the combined model function
-
-            def model(x, *args):
-                return _model1(x, args[:idx1]) + _model3(x, args[idx1:])
-
-            self._model = model
+        if self.sig_comp2.currentText() == "None":
+            self._model, self._derivative, self.params, self.limits = self.gaussian()
         else:
-            self._model, _i, _j, self.params, self.limits = self.constrained_gaussians()
+            self._model, self._derivative, self.params, self.limits = self.constrained_gaussians()
             if self.constrain_dE is not None:
                 nconstraint = cost.NormalConstraint("loc2_loc1", *self.constrain_dE)
 
@@ -520,21 +509,41 @@ class PhotonExcitationFit(Fit2Signals1Background):
             if par in self.params:
                 self.params[par] = self.m.values[par]
 
+        jax.config.update("jax_enable_x64", True)
+
+        @jax.jit
+        def _cost(par):
+            result = 0.0
+            for xi, yi, dxi, dyi in zip(self.x, self.y, self.xerr, self.yerr):
+                y_var = dyi**2 + (self._derivative(xi, *par) * dxi) ** 2
+                result += (yi - self._model(xi, *par)) ** 2 / y_var
+            return result
+
+        class LeastSquaresXY(cost.LeastSquares):
+
+            def _value(self, args: Sequence[float]) -> float:
+                return _cost(args)
+
         # Update the cost function
         if nconstraint is None:
-            self.cost = cost.LeastSquares(self.x, self.y, self.yerr, self._model)
+            self.cost = LeastSquaresXY(self.x, self.y, self.yerr, self._model)
         else:
-            self.cost = cost.LeastSquares(self.x, self.y, self.yerr, self._model) + nconstraint
+            self.cost = LeastSquaresXY(self.x, self.y, self.yerr, self._model) + nconstraint
 
         # Update the Minuit object
         self.m = Minuit(self.cost, *list(self.params.values()), name=list(self.params.keys()))
         for par, lim in self.limits.items():
             self.m.limits[par] = lim
 
+        def plot(args):
+            plt.errorbar(self.x, self.y, yerr=self.yerr, xerr=self.xerr, fmt="ok")
+            x = np.linspace(self.xr[0], self.xr[1], 1000)
+            plt.plot(x, self._model(x, *args))
+
         # Remove the old fit widget
         self.layout.removeWidget(self.fit_widget)
-        # Update the visualization
-        self.fit_widget = make_widget(self.m, self.m._visualize(None), {}, False, False)
+        # Update the fit widget
+        self.fit_widget = make_widget(self.m, plot, {}, False, False)
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
 
     def _init_model_list(self) -> None:
@@ -544,6 +553,25 @@ class PhotonExcitationFit(Fit2Signals1Background):
         self.bkg_models = {
             "Constant": self.constant,
         }
+
+    def gaussian(self) -> Tuple[callable, callable, dict, dict]:
+        dx = self.xr[1] - self.xr[0]
+        params = {
+            "s1": self.sinit, "loc1": self.xr[0] + 0.5 * dx,
+            "scale1": 0.1 * dx, "b": self.x[1] - self.x[0]
+        }
+        limits = {
+            "s1": (0, self.smax), "loc1": self.xr,
+            "scale1": (0.0001 * dx, 0.5 * dx), "b": (0, None)
+        }
+
+        def model(x, s1, loc1, scale1, b):
+            return s1 * jnorm.pdf(x, loc1, scale1) + b
+
+        def derivative(x, s1, loc1, scale1, b):
+            return -s1 * jnorm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
+
+        return model, derivative, params, limits
 
     def constrained_gaussians(self) -> Tuple[callable, callable, dict, dict]:
         dx = self.xr[1] - self.xr[0]
@@ -560,8 +588,11 @@ class PhotonExcitationFit(Fit2Signals1Background):
         }
 
         def model(x, s1, s2, loc1, loc2_loc1, scale1, b):
-            return (s1 * truncnorm.pdf(x, self.xr[0], self.xr[1], loc1, scale1)
-                    + s2 * truncnorm.pdf(x, self.xr[0], self.xr[1], loc1 + loc2_loc1, scale1)
-                    + b * uniform.pdf(x, self.xr[0], self.xr[1] - self.xr[0]))
+            return (s1 * jnorm.pdf(x, loc1, scale1)
+                    + s2 * jnorm.pdf(x, loc1 + loc2_loc1, scale1) + b)
 
-        return model, None, None, params, limits
+        def derivative(x, s1, s2, loc1, loc2_loc1, scale1, b):
+            return (-s1 * jnorm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
+                    - s2 * jnorm.pdf(x, loc1 + loc2_loc1, scale1) * (x - loc1 - loc2_loc1) / scale1**2)
+
+        return model, derivative, params, limits

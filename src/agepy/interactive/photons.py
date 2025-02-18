@@ -239,6 +239,7 @@ class PhexViewer(AGEDataViewer):
         # Get the data in the selected range
         in_range = (self.x >= xr[0]) & (self.x <= xr[1])
         x = self.x[in_range]
+        xerr = np.ones_like(x) * 0.00025
         y = self.y[in_range]
         yerr = self.yerr[in_range]
 
@@ -263,10 +264,10 @@ class PhexViewer(AGEDataViewer):
                 constraint = None
             else:
                 constraint = (np.abs(E2["E"].iloc[0] - E1["E"].iloc[0]), 0.0005)
-            self.debug_fit = PhotonExcitationFit(y, yerr, x, sig=["Gaussian", "Gaussian"], bkg="Constant", constrain_dE=constraint)
+            self.debug_fit = PhotonExcitationFit(y, yerr, x, xerr, sig=["Gaussian", "Gaussian"], bkg="Constant", constrain_dE=constraint)
         else:
             exc2 = None
-            self.debug_fit = PhotonExcitationFit(y, yerr, x, sig="Gaussian", bkg="Constant")
+            self.debug_fit = PhotonExcitationFit(y, yerr, x, xerr, sig="Gaussian", bkg="Constant")
 
         # Fit the data
         self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -274,14 +275,33 @@ class PhexViewer(AGEDataViewer):
         self.debug_fit.show()
 
     def on_fit_closed(self, m, exc1, exc2):
+        df = self.scan.phex_assignments.copy()
+        for l, val in exc1.items():
+            if df.empty:
+                break
+            df.query(f"{l} == @val", inplace=True)
+        if df.empty:
+            idx = self.scan.phex_assignments.index.max()
+            if np.isnan(idx):
+                idx = 0
+            else:
+                idx += 1
+        else:
+            idx = df.index[0]
         exc1["E"] = float(m.values["loc1"])
         exc1["val"] = np.array(m.values["s1", "loc1", "scale1"])
         exc1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
-        idx = self.scan.phex_assignments.index.max()
-        if np.isnan(idx):
-            idx = -1
-        self.scan.phex_assignments.loc[idx + 1] = exc1
+        self.scan.phex_assignments.loc[idx] = exc1
         if exc2 is not None:
+            df = self.scan.phex_assignments.copy()
+            for l, val in exc2.items():
+                if df.empty:
+                    break
+                df = df.query(f"{l} == @val")
+            if df.empty:
+                idx = self.scan.phex_assignments.index.max() + 1
+            else:
+                idx = df.index[0]
             if "loc2" in m.parameters:
                 exc2["E"] = float(m.values["loc2"])
                 exc2["val"] = np.array(m.values["s2", "loc2", "scale2"])
@@ -294,7 +314,7 @@ class PhexViewer(AGEDataViewer):
                 exc2["E"] = loc2
                 exc2["val"] = np.array([m.values["s2"], loc2, m.values["scale1"]])
                 exc2["err"] = np.array([m.errors["s2"], loc2err, m.errors["scale1"]])
-            self.scan.phex_assignments.loc[idx + 2] = exc2
+            self.scan.phex_assignments.loc[idx] = exc2
         # Update the plot
         self.plot()
         self.debug_fit = None

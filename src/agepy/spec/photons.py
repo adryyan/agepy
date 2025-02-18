@@ -16,6 +16,8 @@ import h5py
 
 from ._anodes import *
 from agepy.interactive.photons import AGEScanViewer, QEffViewer, PhexViewer, PhemViewer
+from agepy.interactive.util import import_jacobi_propagate, import_iminuit
+propagate = import_jacobi_propagate()
 from agepy.interactive import AGEpp
 
 # Import modules for type hinting
@@ -123,9 +125,14 @@ class Spectrum:
             err = np.sqrt(err**2 + bkg_err**2)
         # Normalize data to account for beam intensity, gas
         # pressure, etc.
-        for value in self._norm:
-            n /= getattr(self, value)
-            err /= getattr(self, value)
+        for norm in self._norm:
+            if isinstance(getattr(self, norm), np.ndarray):
+                val, err_val = getattr(self, norm)
+                err = np.sqrt(err**2 / val**2 + err_val**2 * n**2 / val**4)
+                n /= val
+            else:
+                n /= getattr(self, norm)
+                err /= getattr(self, norm)
         return n, err
 
     def spectrum(self,
@@ -202,14 +209,24 @@ class Spectrum:
             errors = np.sqrt(errors**2 + bkg_err**2)
         # Normalize data to account for beam intensity, gas 
         # pressure, etc.
-        for value in self._norm:
-            spectrum /= getattr(self, value)
-            errors /= getattr(self, value)
+        for norm in self._norm:
+            if isinstance(getattr(self, norm), np.ndarray):
+                val, err_val = getattr(self, norm)
+                errors = np.sqrt(errors**2 / val**2 + err_val**2 * spectrum**2 / val**4)
+                spectrum /= val
+            else:
+                spectrum /= getattr(self, norm)
+                errors /= getattr(self, norm)
         # Return the spectrum and uncertainties
         return spectrum, errors
 
     def transform_norm(self, norm: str, func: callable):
-        setattr(self, norm, func(getattr(self, norm)))
+        val = getattr(self, norm)
+        if isinstance(val, np.ndarray):
+            val, err = propagate(func, val[0], val[1]**2)
+            setattr(self, norm, np.array([val, np.sqrt(err)]))
+        else:
+            setattr(self, norm, func(val))
 
     def convert_unit(self, norm: str, fro: str, to: str):
         try:
@@ -219,8 +236,8 @@ class Spectrum:
             raise ImportError("pint is required to convert units.")
         ureg = UnitRegistry()
         # Convert the normalization values
-        val = getattr(self, norm)
-        setattr(self, norm, ureg.Quantity(val, fro).m_as(to))
+        func = lambda x: ureg.Quantity(x, fro).m_as(to)
+        self.transform_norm(norm, func)
 
 
 class BaseScan:
@@ -289,7 +306,10 @@ class BaseScan:
             raw = h5[raw + "/0"]
             # Load normalization values
             for key, h5path in norm.items():
-                norm[key] = np.asarray(h5[h5path + "/0"])
+                if h5path.endswith("avg"):
+                    norm[key] = np.asarray(h5[h5path + "/0"])
+                else:
+                    norm[key] = h5[h5path + "/0"]
             # Format the data and steps
             spectra = []
             step_val = []
@@ -302,7 +322,13 @@ class BaseScan:
                 # Format the raw data
                 data = np.asarray(raw[step])
                 # Format the normalization values
-                step_norm = {key: value[i] for key, value in norm.items()}
+                step_norm = {}
+                for key, value in norm.items():
+                    if isinstance(value, np.ndarray):
+                        step_norm[key] = value[i]
+                    else:
+                        values = np.asarray(value[step])
+                        step_norm[key] = np.array([np.mean(values), np.std(values)])
                 # Initialize the spectrum instance
                 spectra.append(Spectrum(anode.process(data),
                                         time=time_per_step, **step_norm))
@@ -544,6 +570,70 @@ class EnergyScan(Scan):
         """
         app = AGEpp(PhexViewer, self, reference, qnum, energy_range, simulation)
         app.run()
+
+    def plot_phex(self,
+        reference: pd.DataFrame,
+    ) -> Minuit:
+        fit_energies = []
+        ref_energies = []
+        labels = []
+        for i, row in self.phex_assignments.iterrows():
+            ref = reference.copy()
+            label = ""
+            for key, value in row.items():
+                if key in ["E", "val", "err"]:
+                    continue
+                ref.query(f"{key} == @value", inplace=True)
+                label += f"{key} = {value}, "
+            label = label[:-2]
+            if ref.empty:
+                continue
+            fit_energies.append([row["val"][1], row["err"][1]])
+            ref_energies.append(ref["E"].iloc[0])
+            labels.append(label)
+        fit_energies = np.array(fit_energies)
+        ref_energies = np.array(ref_energies)
+        labels = np.array(labels)
+        # Sort by calibration energies
+        idx = np.argsort(ref_energies)
+        ref_energies = ref_energies[idx]
+        fit_energies = fit_energies[idx]
+        labels = labels[idx]
+        # Define the Model
+        def model(x, b0, b1):
+            return b1 * x + b0
+        # Create the cost function
+        Minuit, cost = import_iminuit()
+        c = cost.LeastSquares(ref_energies, fit_energies[:,0], fit_energies[:,1], model)
+        # Initialize the minimizer
+        m = Minuit(c, b1=1, b0=0)
+        m.limits["b1"] = (0.9, 1.1)
+        m.limits["b0"] = (-0.1, 0.1)
+        m.migrad()
+        # Check pulls
+        pulls = np.abs(c.pulls(m.values))
+        inds = np.argwhere(pulls > 5).flatten()
+        for idx in inds:
+            print("Bad assignment of:", labels[idx], "with diff:", c.prediction(m.values)[idx] - fit_energies[idx,0])
+        # Plot the results
+        fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+        ax[0].errorbar(ref_energies, fit_energies[:,0], yerr=fit_energies[:,1],
+                       fmt="s", markersize=1.5, label="Assign. Phex")
+        ax[0].plot(ref_energies, c.prediction(m.values), label="Lin. Regr.")
+        #chi2ndof = m.fmin.reduced_chi2
+        #ax[0].legend(title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}", loc="best")
+        ax[0].legend()
+        ax[0].set_title(r"Assigned Photon-Excitation Energies $E_\text{data}$")
+        ax[0].set_ylabel(r"$E_\text{data}$ [eV]")
+        ax[1].axhline(0, color="black", linestyle="--", alpha=0.9)
+        #ax[1].step(ref_energies, c.pulls(m.values), where="mid")
+        ax[1].step(ref_energies, c.prediction(m.values) - fit_energies[:,0], where="mid")
+        #ax[1].set_title("Studentized Residuals of the Linear Regression")
+        ax[1].set_title("Difference to the Linear Regression")
+        #ax[1].set_ylabel("Pulls")
+        ax[1].set_ylabel(r"$(\text{Lin. Regr.} - E_\text{data})$ [eV]")
+        ax[1].set_xlabel(r"$E_\text{literature}$ [eV]")
+        return fig, ax
 
     def save_phex(self, path: str) -> None:
         with open(path, "wb") as f:
