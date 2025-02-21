@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Sequence, Tuple, Dict
+from typing import Sequence, Tuple, Dict, Union
 import warnings
 from typing import TYPE_CHECKING
 import numpy as np
@@ -12,7 +12,7 @@ qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
 propagate = import_jacobi_propagate()
 # Import internal modules
 from agepy.interactive import AGEDataViewer
-from agepy.interactive.ui import PhexDialog, PhemDialog, FitSetupDialog
+from agepy.interactive.ui import AssignmentDialog
 from agepy.interactive.fitting import PhotonSpectrumFit, PhotonExcitationFit
 from agepy import ageplot
 # Import modules for type hinting
@@ -118,7 +118,7 @@ class PhexViewer(AGEDataViewer):
     def __init__(self,
         scan: EnergyScan,
         reference: pd.DataFrame,
-        label: Dict,
+        label: Dict[str, Union[Sequence[str], int]],
         energy_range: float,
         simulation: pd.DataFrame,
     ) -> None:
@@ -213,7 +213,7 @@ class PhexViewer(AGEDataViewer):
         self.plot()
 
     def look_up(self):
-        dialog = PhexDialog(self, self.label, title="Look-Up")
+        dialog = AssignmentDialog(self, self.label, title="Look-Up")
         if dialog.exec():
             exc = dialog.get_input()
             if self.simulation is not None:
@@ -244,12 +244,12 @@ class PhexViewer(AGEDataViewer):
         yerr = self.yerr[in_range]
 
         # Get the assignments
-        dialog = PhexDialog(self, self.label, title="Assign Peak 1")
+        dialog = AssignmentDialog(self, self.label, title="Assign Peak 1")
         if dialog.exec():
             exc1 = dialog.get_input()
         else:
             return
-        dialog = PhexDialog(self, self.label, title="Assign Peak 2")
+        dialog = AssignmentDialog(self, self.label, title="Assign Peak 2")
         if dialog.exec():
             exc2 = dialog.get_input()
             E1 = self.reference.copy()
@@ -324,15 +324,17 @@ class PhemViewer(AGEDataViewer):
     def __init__(self,
         scan: EnergyScan,
         reference: pd.DataFrame,
-        qnum: Sequence[str],
-        wl_range: Tuple[float, float],
+        phem_label: Dict[str, Union[Sequence[str], int]],
+        phex_label: Dict[str, Union[Sequence[str], int]],
+        calib_guess: Tuple[float, float],
         simulation: pd.DataFrame,
     ) -> None:
         super().__init__()
         self.scan = scan
         self.reference = reference
-        self.qnum = qnum
-        self.wl_range = wl_range
+        self.phem_label = phem_label
+        self.phex_label = phex_label
+        self.calib = calib_guess
         self.simulation = simulation
         # Add emtpy figure
         self.add_plot()
@@ -349,43 +351,89 @@ class PhemViewer(AGEDataViewer):
         self.view_results.setCheckable(True)
         self.view_results.clicked.connect(self.show_results)
         self.toolbar.addWidget(self.view_results)
+        # Prepare assignments
+        if self.scan.phex_assignments is None:
+            raise ValueError("Phex assignments are required.")
+        if self.scan.phem_assignments is None:
+            self.scan.phem_assignments = pd.DataFrame(columns=[*self.phem_label, *self.phex_label, "val", "err"])
+        self.phex = self.scan.phex_assignments.copy()
         # Current index
-        self.phex = list(self.scan.phex_assignments.keys())
         self.idx = 0
         # Define bins
         self.edges = np.histogram([], bins=512, range=(0, 1))[1]
         # Plot the first spectrum
         self.plot()
 
+    def _parse_phex(self):
+        phex = self.phex.iloc[self.idx]
+        phex_dict = {}
+        phex_str = ""
+        for key, val in phex.items():
+            if key in ["E", "val", "err"]:
+                continue
+            phex_dict[key] = val
+            phex_str += f"{key}={val}, "
+        return phex, phex_dict, phex_str[:-2]
+
     def plot(self):
         with ageplot.context(["age", "dataviewer"]):
             self.ax.clear()
+            # Convert x limits to wavelength
+            xlim = (self.scan.roi["x"]["min"], self.scan.roi["x"]["max"])
+            b0, b1 = self.calib
+            a1 = 1 / b1
+            a0 = -b0 / b1
+            wlim = (xlim[0] * b1 + b0, xlim[1] * b1 + b0)
+            phex, phex_dict, phex_str = self._parse_phex()
             # Plot data
             spec, err = self.scan.assigned_spectrum(
-                self.phex[self.idx], self.edges, calib=False)
+                phex_dict, self.edges, calib=False)
             self.ax.stairs(spec, self.edges, color=ageplot.colors[1])
-            xlim = (self.scan.roi["x"]["min"], self.scan.roi["x"]["max"])
             self.ax.set_xlim(*xlim)
             self.ax.set_ylim(0, np.max(spec) * 1.1)
-            self.ax.set_title(f"{self.phex[self.idx]}")
+            self.ax.set_title(phex_str)
+            # Plot assignments
+            phem = self.scan.phem_assignments.copy()
+            for l, val in phex_dict.items():
+                if phem.empty:
+                    break
+                phem.query(f"{l} == @val", inplace=True)
+            for i, row in phem.iterrows():
+                fit_val = row["val"]
+                fit_err = row["err"]
+                x = np.linspace(*xlim, 1000)
+                y, yerr = propagate(lambda par: par[0] * scipy_norm.pdf(x, *par[1:]), fit_val, fit_err**2)
+                yerr = np.sqrt(np.diag(yerr))
+                dx = self.edges[1] - self.edges[0]
+                y *= dx
+                yerr *= dx
+                self.ax.plot(x, y, color=ageplot.colors[0])
+                self.ax.fill_between(x, y - yerr, y + yerr, color=ageplot.colors[0], alpha=0.5)
             # Plot reference
-            exc = self.phex[self.idx]
-            ref = self.reference.query("E >= 130").query(
-                "E <= 170").query("El == @exc[0]").query(
-                    "vp == @exc[1]").query("Jp == @exc[2]")
-            for i, row in ref.iterrows():
-                x = row["E"] * self.wl_range[1] + self.wl_range[0]
-                self.ax.axvline(x, color="black", linestyle="--")
-                text = f"{row["vpp"]},{row["Jpp"]}"
-                self.ax.text(x + 0.0002, np.max(spec), text, ha="left",
-                             va="top", rotation=90)
+            ref = self.reference.query("E >= @wlim[0]").query("E <= @wlim[1]")
+            for pl in self.phex_label:
+                if ref.empty:
+                    break
+                if pl not in ref:
+                    continue
+                val = phex[pl]
+                ref.query(f"{pl} == @val", inplace=True)
+            if not ref.empty:
+                for i, row in ref.iterrows():
+                    x = row["E"] * a1 + a0
+                    self.ax.axvline(x, color="black", linestyle="--")
+                    text = ""
+                    for l in self.phem_label:
+                        text += f"{row[l]},"
+                    self.ax.text(x + 0.0002, np.max(spec), text[:-1], ha="left",
+                                 va="top", rotation=90)
             # Plot simulated spectrum
             if self.simulation is not None:
-                x = np.linspace(135, 170, 1000)
-                y = self.simulation.spectrum(self.phex[self.idx], x, 0.01, "nm")
+                x = np.linspace(*wlim, 1000)
+                y = self.simulation.spectrum(phex_dict, x, 0.02, "nm")
                 y = y / np.max(y) * np.max(spec)
                 # Scale x to xlim
-                x = x * self.wl_range[1] + self.wl_range[0]
+                x = x * a1 + a0
                 self.ax.plot(x, y, color=ageplot.colors[0])
             self.canvas.draw_idle()
 
@@ -402,12 +450,7 @@ class PhemViewer(AGEDataViewer):
         self.plot()
 
     def look_up(self):
-        dialog = PhexDialog(self)
-        if dialog.exec():
-            exc = dialog.get_input()
-            if tuple(exc) in self.phex:
-                self.idx = self.phex.index(tuple(exc))
-                self.plot()
+        pass
 
     def show_results(self):
         if self.view_results.isChecked():
@@ -468,9 +511,11 @@ class PhemViewer(AGEDataViewer):
 
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
         xr = (eclick.xdata, erelease.xdata)
-        # Get the data in the selected range
+        phex, phex_dict, phex_str = self._parse_phex()
+
+        # Get the spectrum
         spec, err = self.scan.assigned_spectrum(
-            self.phex[self.idx], self.edges, calib=False)
+            phex_dict, self.edges, calib=False)
         in_range = np.argwhere((self.edges >= xr[0]) & (self.edges <= xr[1])).flatten()
         x = self.edges[in_range]
         y = spec[in_range[:-1]]
@@ -480,25 +525,49 @@ class PhemViewer(AGEDataViewer):
         n = np.stack((y, yerr**2), axis=-1)
         self.debug_fit = PhotonSpectrumFit(n, x, sig=["Gaussian", "Gaussian"], bkg="Constant")
         self.debug_fit.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.debug_fit.m))
+        self.debug_fit.destroyed.connect(lambda: self.on_fit_closed(self.debug_fit.m, phex_dict))
         self.debug_fit.show()
 
-    def on_fit_closed(self, m):
-        self.debug_fit = None
-        dialog = PhemDialog(self)
+    def on_fit_closed(self, m, phex):
+        dialog = AssignmentDialog(self, self.phem_label, title="Assign Peak 1")
         if dialog.exec():
-            loc = "loc" if "loc" in m.parameters else "loc1"
-            phem = tuple(dialog.get_input())
-            phex = tuple(self.phex[self.idx])
-            if phex in self.scan.phem_assignments:
-                self.scan.phem_assignments[phex][phem] = (m.values[loc], m.errors[loc])
+            phem1 = dialog.get_input()
+            df = self.scan.phem_assignments.copy()
+            for l, val in phem1.items():
+                if df.empty:
+                    break
+                df.query(f"{l} == @val", inplace=True)
+            for l, val in phex.items():
+                phem1[l] = val
+                df.query(f"{l} == @val", inplace=True)
+            if df.empty:
+                idx = self.scan.phem_assignments.index.max()
+                if np.isnan(idx):
+                    idx = 0
+                else:
+                    idx += 1
             else:
-                self.scan.phem_assignments[phex] = {phem: (m.values[loc], m.errors[loc])}
-        dialog = PhemDialog(self)
-        if dialog.exec() and "loc2" in m.parameters:
-            phem = tuple(dialog.get_input())
-            phex = tuple(self.phex[self.idx])
-            if phex in self.scan.phem_assignments:
-                self.scan.phem_assignments[phex][phem] = (m.values["loc2"], m.errors["loc2"])
+                idx = df.index[0]
+            phem1["val"] = np.array(m.values["s1", "loc1", "scale1"])
+            phem1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
+            self.scan.phem_assignments.loc[idx] = phem1
+        dialog = AssignmentDialog(self, self.phem_label, title="Assign Peak 2")
+        if "loc2" in m.parameters and dialog.exec():
+            phem2 = dialog.get_input()
+            df = self.scan.phem_assignments.copy()
+            for l, val in phem2.items():
+                if df.empty:
+                    break
+                df.query(f"{l} == @val", inplace=True)
+            for l, val in phex.items():
+                phem2[l] = val
+                df.query(f"{l} == @val", inplace=True)
+            if df.empty:
+                idx = self.scan.phem_assignments.index.max() + 1
             else:
-                self.scan.phem_assignments[phex] = {phem: (m.values["loc2"], m.errors["loc2"])}
+                idx = df.index[0]
+            phem2["val"] = np.array(m.values["s2", "loc2", "scale2"])
+            phem2["err"] = np.array(m.errors["s2", "loc2", "scale2"])
+            self.scan.phem_assignments.loc[idx] = phem2
+        self.debug_fit = None
+        self.plot()

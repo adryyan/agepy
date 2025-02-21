@@ -2,7 +2,7 @@
 
 """
 from __future__ import annotations
-from typing import Union, Tuple, Sequence
+from typing import Union, Tuple, Sequence, Dict
 from typing import TYPE_CHECKING
 import warnings
 
@@ -120,6 +120,9 @@ class Spectrum:
         # Subtract background before further normalization
         if background is not None:
             bkg_counts, bkg_err = background.counts(roi=roi, qeff=qeff)
+            # Using just the statistical uncertainty of the background
+            # counts would underestimate the uncertainty of the subtraction
+            bkg_err = np.sqrt(bkg_counts * self._t) / self._t
             n -= bkg_counts
             n = max(n, 0)
             err = np.sqrt(err**2 + bkg_err**2)
@@ -204,6 +207,9 @@ class Spectrum:
             bkg_spec, bkg_err = background.spectrum(
                 edges, roi=roi, qeff=qeff, calib=calib
             )
+            # Using just the statistical uncertainty of the background
+            # counts would underestimate the uncertainty of the subtraction
+            bkg_err = np.sqrt(bkg_spec * self._t) / self._t
             spectrum -= bkg_spec
             spectrum[spectrum < 0] = 0
             errors = np.sqrt(errors**2 + bkg_err**2)
@@ -338,6 +344,7 @@ class BaseScan:
     def counts(self,
         roi: dict = None,
         qeff: bool = True,
+        xrange: Tuple[float, float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get the photon-excitation energy spectrum.
 
@@ -364,8 +371,13 @@ class BaseScan:
         vectorized_counts = np.vectorize(
             lambda spec: spec.counts(roi=roi, qeff=qeff, background=self.bkg)
         )
-        n, err = vectorized_counts(self.spectra)
-        return n, err, self.steps
+        if xrange is not None:
+            mask = (self.steps >= xrange[0]) & (self.steps <= xrange[1])
+            n, err = vectorized_counts(self.spectra[mask])
+            return n, err, self.steps[mask]
+        else:
+            n, err = vectorized_counts(self.spectra)
+            return n, err, self.steps
 
     def norm(self, norm: str) -> np.ndarray:
         return np.array([getattr(spec, norm) for spec in self.spectra])
@@ -546,7 +558,9 @@ class EnergyScan(Scan):
         super().__init__(data_files, anode, energies, raw, time_per_step, roi,
                          target_density, intensity_upstream, **norm)
         self.phex_assignments = None
-        self.phem_assignments = {}
+        self.phex_label = None
+        self.phem_assignments = None
+        self.phem_label = None
 
     @property
     def energies(self) -> np.ndarray:
@@ -556,23 +570,22 @@ class EnergyScan(Scan):
     def energies(self, value: np.ndarray) -> None:
         self.steps = value
 
-    def counts_fit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return self._counts_fit_y, self._counts_fit_yerr, self._counts_fit_x
-
     def assign_phex(self,
         reference: pd.DataFrame,
-        qnum: Sequence[str],
+        label: Dict[str, Union[Sequence[str], int]],
         energy_range: float,
         simulation: pd.DataFrame = None,
     ) -> None:
         """Calibrate the exciting-photon energies.
 
         """
-        app = AGEpp(PhexViewer, self, reference, qnum, energy_range, simulation)
+        self.phex_label = label
+        app = AGEpp(PhexViewer, self, reference, label, energy_range, simulation)
         app.run()
 
     def plot_phex(self,
         reference: pd.DataFrame,
+        plot_pulls: bool = True,
     ) -> Minuit:
         fit_energies = []
         ref_energies = []
@@ -626,12 +639,14 @@ class EnergyScan(Scan):
         ax[0].set_title(r"Assigned Photon-Excitation Energies $E_\text{data}$")
         ax[0].set_ylabel(r"$E_\text{data}$ [eV]")
         ax[1].axhline(0, color="black", linestyle="--", alpha=0.9)
-        #ax[1].step(ref_energies, c.pulls(m.values), where="mid")
-        ax[1].step(ref_energies, c.prediction(m.values) - fit_energies[:,0], where="mid")
-        #ax[1].set_title("Studentized Residuals of the Linear Regression")
-        ax[1].set_title("Difference to the Linear Regression")
-        #ax[1].set_ylabel("Pulls")
-        ax[1].set_ylabel(r"$(\text{Lin. Regr.} - E_\text{data})$ [eV]")
+        if plot_pulls:
+            ax[1].step(ref_energies, c.pulls(m.values), where="mid")
+            ax[1].set_title("Studentized Residuals of the Linear Regression")
+            ax[1].set_ylabel("Pulls")
+        else:
+            ax[1].step(ref_energies, c.prediction(m.values) - fit_energies[:,0], where="mid")
+            ax[1].set_title("Difference to the Linear Regression")
+            ax[1].set_ylabel(r"$(\text{Lin. Regr.} - E_\text{data})$ [eV]")
         ax[1].set_xlabel(r"$E_\text{literature}$ [eV]")
         return fig, ax
 
@@ -645,31 +660,65 @@ class EnergyScan(Scan):
 
     def assign_phem(self,
         reference: pd.DataFrame,
-        qnum: Sequence[str],
+        phem_label: Dict[str, Union[Sequence[str], int]],
+        phex_label: Sequence[str],
         wl_range: Tuple[float, float],
         simulation: pd.DataFrame = None,
     ) -> None:
         """Calibrate the exciting-photon energies.
 
         """
-        app = AGEpp(PhemViewer, self, reference, qnum, wl_range, simulation)
+        app = AGEpp(PhemViewer, self, reference, phem_label, phex_label, wl_range, simulation)
         app.run()
 
+    def save_phem(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self.phem_assignments, f)
+
+    def load_phem(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self.phem_assignments = pickle.load(f)
+
     def assigned_spectrum(self,
-        phex: Tuple,
+        phex: Dict[str, Union[str, int]],
         edges: np.ndarray,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
+        norm_phex: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get the spectrum with assigned energies.
 
         """
-        if tuple(phex) not in self.phex_assignments:
-            raise ValueError("Phex assignment not found.")
-        val, cov = self.phex_assignments[tuple(phex)]
+        df = self.phex_assignments.copy()
+        for key, value in phex.items():
+            if df.empty:
+                raise ValueError("Phex assignment not found.")
+            df.query(f"{key} == @value", inplace=True)
+        # At this point there should be only one assignment
+        assert len(df) == 1, "Multiple or no assignments found."
+        fit_val = df["val"].iloc[0]
+        fit_err = df["err"].iloc[0]
         # Find clossest energy step
-        step_idx = np.argmin(np.abs(self.steps - val[1]))
+        n = 1.2
+        step_idx = np.argwhere(np.abs(self.steps - fit_val[1]) < fit_val[2] * n).flatten()
+        if len(step_idx) == 0:
+            raise ValueError("No steps found.")
+        # Define energy range
+        erange = (fit_val[1] - fit_val[2] * n, fit_val[1] + fit_val[2] * n)
+        # Check if multiple phex assignments overlap
+        overlap = self.phex_assignments.query("E > @erange[0] and E < @erange[1]")
+        for i, row in overlap.iterrows():
+            if i == df.index[0]:
+                continue
+            _val = row["val"]
+            _step_idx = np.argwhere(np.abs(self.steps - _val[1]) < _val[2] * n).flatten()
+            # Remove the overlapping steps
+            _step_idx = np.setdiff1d(step_idx, _step_idx)
+            if len(_step_idx) == 0:
+                warnings.warn("No steps found without overlap.")
+            else:
+                step_idx = _step_idx
         # Get quantum efficiency
         if qeff and self.qeff is not None:
             xe = np.histogram([], bins=512, range=(0, 1))[1]
@@ -686,9 +735,21 @@ class EnergyScan(Scan):
             calib = self.calib
         else:
             calib = None
-        # Return the spectrum
-        return self.spectra[step_idx].spectrum(
-            edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib)
+        # Combine the specta
+        spec = np.zeros(len(edges) - 1)
+        err = np.zeros(len(edges) - 1)
+        for idx in step_idx:
+            s, e = self.spectra[idx].spectrum(edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib)
+            if norm_phex:
+                s /= fit_val[0]
+                e = np.sqrt(e**2 / fit_val[0]**2 + s**2 * fit_err[0]**2 / fit_val[0]**4)
+            spec += s
+            err += e**2
+        err = np.sqrt(err)
+        if norm_phex:
+            spec /= len(step_idx)
+            err /= len(step_idx)
+        return spec, err
 
     def phexphem(self,
         xedges: np.ndarray = None,

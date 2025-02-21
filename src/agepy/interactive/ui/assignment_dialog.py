@@ -3,7 +3,7 @@ from agepy.interactive.util import import_qt_binding
 qt_binding, QtWidgets, QtCore, QtGui = import_qt_binding()
 
 
-class PhexDialog(QtWidgets.QDialog):
+class AssignmentDialog(QtWidgets.QDialog):
     def __init__(self, parent, label, title="Assign Peak"):
         super().__init__(parent)
         self.setWindowTitle(title)
