@@ -346,11 +346,6 @@ class PhemViewer(AGEDataViewer):
         self.add_forward_backward_action(self.prev, self.next)
         # Add Look-Up button
         self.add_lookup_action(self.look_up)
-        # Add button to view results
-        self.view_results = QtWidgets.QPushButton("View Results")
-        self.view_results.setCheckable(True)
-        self.view_results.clicked.connect(self.show_results)
-        self.toolbar.addWidget(self.view_results)
         # Prepare assignments
         if self.scan.phex_assignments is None:
             raise ValueError("Phex assignments are required.")
@@ -387,7 +382,7 @@ class PhemViewer(AGEDataViewer):
             phex, phex_dict, phex_str = self._parse_phex()
             # Plot data
             spec, err = self.scan.assigned_spectrum(
-                phex_dict, self.edges, calib=False)
+                phex_dict, self.edges, calib=False, uncertainties="fast")
             self.ax.stairs(spec, self.edges, color=ageplot.colors[1])
             self.ax.set_xlim(*xlim)
             self.ax.set_ylim(0, np.max(spec) * 1.1)
@@ -452,70 +447,13 @@ class PhemViewer(AGEDataViewer):
     def look_up(self):
         pass
 
-    def show_results(self):
-        if self.view_results.isChecked():
-            with ageplot.context(["age", "dataviewer"]):
-                self.ax.clear()
-                fit_wl = []
-                calib_wl = []
-                for exc in self.scan.phem_assignments:
-                    for rlx, res in self.scan.phem_assignments[tuple(exc)].items():
-                        line = self.reference.query("El == @exc[0]").query(
-                            "vp == @exc[1]").query("Jp == @exc[2]").query(
-                            "vpp == @rlx[0]").query("Jpp == @rlx[1]")
-                        if line.empty:
-                            continue
-                        val, err = res
-                        fit_wl.append([val, err])
-                        calib_wl.append(line["E"].iloc[0])
-                fit_wl = np.array(fit_wl)
-                calib_wl = np.array(calib_wl)
-                # Sort by calibration wavelength
-                idx = np.argsort(calib_wl)
-                calib_wl = calib_wl[idx]
-                fit_wl = fit_wl[idx]
-                # Import the fitting modules
-                try:
-                    from iminuit import Minuit
-                    from iminuit.cost import LeastSquares
-
-                except ImportError:
-                    raise ImportError("iminuit and numba-stats is required for fitting.")
-
-                # Define the Model
-                def model(x, a0, a1):
-                    return a1 * x + a0
-                # Create the cost function
-                cost = LeastSquares(
-                    calib_wl, fit_wl[:,0], fit_wl[:,1], model)
-                # Initialize the minimizer
-                a1_start = (fit_wl[1,0] - fit_wl[0,0]) / (calib_wl[1] - calib_wl[0])
-                a0_start = fit_wl[0,0] - a1_start * calib_wl[0]
-                m = Minuit(cost, a0=a0_start, a1=a1_start)
-                m.migrad()
-                print(m)
-                self.ax.errorbar(calib_wl, fit_wl[:,0], yerr=fit_wl[:,1],
-                    fmt="s", color=ageplot.colors[0], markersize=1.5,
-                    label="Assign. Phex")
-                self.ax.plot(calib_wl, cost.prediction(m.values),
-                    color=ageplot.colors[1], label="Lin. Regr.")
-                chi2ndof = m.fmin.reduced_chi2
-                self.ax.legend(title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}")
-                self.canvas.draw()
-                a0, a1 = m.values["a0"], m.values["a1"]
-                b1 = 1 / a1
-                b0 = -a0 / a1
-                self.scan.calib = (b0, b1)
-        else:
-            self.plot()
-
     def assign(self, eclick: MouseEvent, erelease: MouseEvent):
         xr = (eclick.xdata, erelease.xdata)
         phex, phex_dict, phex_str = self._parse_phex()
 
         # Get the spectrum
         spec, err = self.scan.assigned_spectrum(
-            phex_dict, self.edges, calib=False)
+            phex_dict, self.edges, calib=False, uncertainties="accurate")
         in_range = np.argwhere((self.edges >= xr[0]) & (self.edges <= xr[1])).flatten()
         x = self.edges[in_range]
         y = spec[in_range[:-1]]

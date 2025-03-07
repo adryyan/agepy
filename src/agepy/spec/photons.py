@@ -9,6 +9,7 @@ import warnings
 import os
 import pickle
 import numpy as np
+from numba import njit, prange
 from scipy.interpolate import CubicSpline
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,6 +27,37 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from iminuit import Minuit
 
+
+
+@njit()
+def compute_bin(x, bin_edges):
+    # assuming uniform bins
+    n = bin_edges.shape[0] - 1
+    a_min = bin_edges[0]
+    a_max = bin_edges[-1]
+
+    # special case to mirror NumPy behavior for last bin
+    if x == a_max:
+        return n - 1 # a_max always in last bin
+
+    bin = int(n * (x - a_min) / (a_max - a_min))
+
+    if bin < 0 or bin >= n:
+        return None
+    else:
+        return bin
+
+
+@njit()
+def numba_histogram(data, bin_edges, weights):
+    hist = np.zeros((bin_edges.shape[0] - 1,), dtype=np.intp)
+
+    for x, w in zip(data.flat, weights.flat):
+        bin = compute_bin(x, bin_edges)
+        if bin is not None:
+            hist[int(bin)] += w
+
+    return hist
 
 
 class Spectrum:
@@ -144,6 +176,7 @@ class Spectrum:
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         background: Spectrum = None,
         calib: Tuple[float, float] = None,
+        uncertainties: str = "accurate",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Notes
@@ -161,43 +194,85 @@ class Spectrum:
         det_image = det_image[det_image[:,1] < roi["y"]["max"]]
         # Don't need y values anymore
         det_image = det_image[:,0].flatten()
-        # Apply spatial detector efficiency correction
-        if qeff is not None:
-            eff, eff_err, xe = qeff
-            x_inds = np.digitize(det_image, xe[1:-1])
-            # Get the inverse of the efficiency
-            eff = eff[x_inds]
-            eff_err = eff_err[x_inds]
-            nonzero = eff > 0
-            eff[nonzero] = 1 / eff[nonzero]
-            eff_err[nonzero] = eff_err[nonzero] / eff[nonzero]
+        # Number of drawn samples
+        if uncertainties == "accurate":
+            n = 10000
+        elif uncertainties == "fast":
+            n = 100
         else:
-            eff = np.ones(det_image.shape[0])
-        # Convert x values to wavelengths
+            raise ValueError("Invalid value for uncertainties parameter.")
+        # Monte Carlo error propagation
+        mcerr = False
+        # Apply spatial detector efficiency correction
+        eff_samples, x_inds = None, None
+        if qeff is not None:
+            mcerr = True
+            eff, eff_err, eff_xe = qeff
+            x_inds = np.digitize(det_image, eff_xe[1:-1])
+            # Draw random samples
+            eff_samples = np.random.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
+        # Prepare the calibration parameters
+        a0_samples, a1_samples = None, None
         if calib is not None:
             a0, a1 = calib
-            det_image = a1 * det_image + a0
-            # Adjust x roi filter to wavelength binning
-            wl_min = edges[edges > (a1 * roi["x"]["min"] + a0)][0]
-            wl_max = edges[edges < (a1 * roi["x"]["max"] + a0)][-1]
-            xroi = (det_image >= wl_min) & (det_image <= wl_max)
+            if len(a0) == 2:
+                mcerr = True
+                a0_samples = np.random.normal(loc=a0[0], scale=a0[1], size=n)
+                a0 = a0[0]
+            if len(a1) == 2:
+                mcerr = True
+                a1_samples = np.random.normal(loc=a1[0], scale=a1[1], size=n)
+                a1 = a1[0]
         else:
-            # Adjust x roi filter to detector binning
-            x_min = edges[edges > roi["x"]["min"]][0]
-            x_max = edges[edges < roi["x"]["max"]][-1]
-            xroi = (det_image >= x_min) & (det_image <= x_max)
-        # Apply x roi filter
-        det_image = det_image[xroi]
-        eff = eff[xroi]
-        # Calculate the sum of weights for each bin, i.e. the weighted spectrum
-        spectrum = np.histogram(det_image, bins=edges, weights=eff)[0]
-        # Histogram data without the per event efficiencies
-        hist = np.histogram(det_image, bins=edges)[0]
-        # Calculate the uncertainties
-        nonzero = hist > 0
-        per_bin_eff = np.ones_like(hist, dtype=float)
-        per_bin_eff[nonzero] = spectrum[nonzero] / hist[nonzero]
-        errors = np.sqrt(hist) * per_bin_eff
+            a0, a1 = 0, 1
+        # Adjust x roi filter to wavelength binning
+        wl_min = edges[edges > (a1 * roi["x"]["min"] + a0)][0]
+        wl_max = edges[edges < (a1 * roi["x"]["max"] + a0)][-1]
+        if not mcerr:
+            wl = a1 * det_image + a0
+            xroi = (wl >= wl_min) & (wl <= wl_max)
+            wl = wl[xroi]
+            spectrum = np.histogram(wl, bins=edges)[0]
+            errors = np.sqrt(spectrum)
+        else:
+            if a0_samples is None:
+                a0_samples = np.ones(n) * a0
+            if a1_samples is None:
+                a1_samples = np.ones(n) * a1
+            if eff_samples is None:
+                eff_samples = np.ones((n, len(det_image)))
+                x_inds = np.arange(len(det_image))
+            # Initialize array for storing the sample results
+            spectrum = np.zeros((n, len(edges) - 1))
+            @njit(parallel=True)
+            def sum_weights(spectrum):
+                for i in prange(n):
+                    # Get the efficiencies for each point
+                    eff = eff_samples[i][x_inds].flatten()
+                    nonzero = eff > 0
+                    eff[nonzero] = 1 / eff[nonzero]
+                    # Convert x values to wavelengths
+                    wl = a1_samples[i] * det_image + a0_samples[i]
+                    # Adjust x roi filter to wavelength binning
+                    xroi = (wl >= wl_min) & (wl <= wl_max)
+                    # Apply x roi filter
+                    wl = wl[xroi]
+                    eff = eff[xroi]
+                    # Calculate the sum of weights for each bin, i.e. the weighted spectrum
+                    spectrum[i] = numba_histogram(wl, edges, eff)
+                return spectrum
+            # Calculate the weighted spectrum for each sample
+            spectrum = sum_weights(spectrum)
+            # Calculate mean and standard deviation of the sampled spectra
+            errors = np.std(spectrum, axis=0)
+            spectrum = np.mean(spectrum, axis=0)
+            # Histogram data without the per event efficiencies
+            hist = np.histogram(a1 * det_image + a0, bins=edges)[0]
+            # Calculate the uncertainties
+            nonzero = hist > 0
+            per_bin_eff = np.ones_like(hist, dtype=float)
+            per_bin_eff[nonzero] = spectrum[nonzero] / hist[nonzero]
+            errors = np.sqrt(np.sqrt(hist)**2 * per_bin_eff**2 + errors**2)
         # Normalize data to measurement duration per step
         if self._t is not None:
             spectrum /= self._t
@@ -205,7 +280,7 @@ class Spectrum:
         # Subtract background before further normalization
         if background is not None:
             bkg_spec, bkg_err = background.spectrum(
-                edges, roi=roi, qeff=qeff, calib=calib
+                edges, roi=roi, qeff=qeff, calib=calib, uncertainties=uncertainties
             )
             # Using just the statistical uncertainty of the background
             # counts would underestimate the uncertainty of the subtraction
@@ -671,6 +746,85 @@ class EnergyScan(Scan):
         app = AGEpp(PhemViewer, self, reference, phem_label, phex_label, wl_range, simulation)
         app.run()
 
+    def plot_phem(self,
+        reference: pd.DataFrame,
+        plot_pulls: bool = True,
+        start: Tuple[float, float] = (100, 40),
+    ) -> Minuit:
+        fit_wl = []
+        ref_wl = []
+        labels = []
+        for i, row in self.phem_assignments.iterrows():
+            ref = reference.copy()
+            label = ""
+            for key, value in row.items():
+                if key in ["val", "err"]:
+                    continue
+                if key not in ref.columns:
+                    continue
+                ref.query(f"{key} == @value", inplace=True)
+                label += f"{key} = {value}, "
+            label = label[:-2]
+            if ref.empty:
+                continue
+            fit_wl.append([row["val"][1], row["err"][1]])
+            ref_wl.append(ref["E"].iloc[0])
+            labels.append(label)
+        fit_wl = np.array(fit_wl)
+        ref_wl = np.array(ref_wl)
+        labels = np.array(labels)
+        # Sort by calibration energies
+        idx = np.argsort(ref_wl)
+        ref_wl = ref_wl[idx]
+        fit_wl = fit_wl[idx]
+        labels = labels[idx]
+        # Define the Model
+        def model(x, b0, b1):
+            return b1 * x + b0
+        # Create the cost function
+        Minuit, cost = import_iminuit()
+        c = cost.LeastSquares(ref_wl, fit_wl[:,0], fit_wl[:,1], model)
+        # Parse start values
+        b1start = 1 / start[1]
+        b0start = -start[0] / start[1]
+        # Initialize the minimizer
+        m = Minuit(c, b1=b1start, b0=b0start)
+        m.migrad()
+        # Set calibration
+        b0, b1 = m.values["b0"], m.values["b1"]
+        b0err, b1err = m.errors["b0"], m.errors["b1"]
+        a1 = 1 / b1
+        a1err = b1err / b1**2
+        a0 = -b0 / b1
+        a0err = np.sqrt(b0err**2 / b1**2 + b0**2 * b1err**2 / b1**4)
+        self.calib = ((a0, a0err), (a1, a1err))
+        # Check pulls
+        pulls = np.abs(c.pulls(m.values))
+        inds = np.argwhere(pulls > 5).flatten()
+        for idx in inds:
+            print("Bad assignment of:", labels[idx], "with diff:", c.prediction(m.values)[idx] - fit_wl[idx,0])
+        # Plot the results
+        fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+        ax[0].errorbar(ref_wl, fit_wl[:,0], yerr=fit_wl[:,1],
+                       fmt="s", markersize=1.5, label="Assign. Phem")
+        ax[0].plot(ref_wl, c.prediction(m.values), label="Lin. Regr.")
+        #chi2ndof = m.fmin.reduced_chi2
+        #ax[0].legend(title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}", loc="best")
+        ax[0].legend()
+        ax[0].set_title(r"Assigned Detector Positions $x_\text{data}$")
+        ax[0].set_ylabel(r"$x_\text{data}$ [arb. u.]")
+        ax[1].axhline(0, color="black", linestyle="--", alpha=0.9)
+        if plot_pulls:
+            ax[1].step(ref_wl, c.pulls(m.values), where="mid")
+            ax[1].set_title("Studentized Residuals of the Linear Regression")
+            ax[1].set_ylabel("Pulls")
+        else:
+            ax[1].step(ref_wl, c.prediction(m.values) - fit_wl[:,0], where="mid")
+            ax[1].set_title("Difference to the Linear Regression")
+            ax[1].set_ylabel(r"$(\text{Lin. Regr.} - x_\text{data})$ [arb. u.]")
+        ax[1].set_xlabel(r"$\lambda_\text{literature}$ [nm]")
+        return fig, ax
+
     def save_phem(self, path: str) -> None:
         with open(path, "wb") as f:
             pickle.dump(self.phem_assignments, f)
@@ -686,6 +840,7 @@ class EnergyScan(Scan):
         bkg: bool = True,
         calib: bool = True,
         norm_phex: bool = False,
+        uncertainties: str = "accurate",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get the spectrum with assigned energies.
 
@@ -739,7 +894,7 @@ class EnergyScan(Scan):
         spec = np.zeros(len(edges) - 1)
         err = np.zeros(len(edges) - 1)
         for idx in step_idx:
-            s, e = self.spectra[idx].spectrum(edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib)
+            s, e = self.spectra[idx].spectrum(edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib, uncertainties=uncertainties)
             if norm_phex:
                 s /= fit_val[0]
                 e = np.sqrt(e**2 / fit_val[0]**2 + s**2 * fit_err[0]**2 / fit_val[0]**4)
