@@ -327,7 +327,6 @@ class PhemViewer(AGEDataViewer):
         phem_label: Dict[str, Union[Sequence[str], int]],
         phex_label: Dict[str, Union[Sequence[str], int]],
         calib_guess: Tuple[float, float],
-        simulation: pd.DataFrame,
     ) -> None:
         super().__init__()
         self.scan = scan
@@ -335,7 +334,6 @@ class PhemViewer(AGEDataViewer):
         self.phem_label = phem_label
         self.phex_label = phex_label
         self.calib = calib_guess
-        self.simulation = simulation
         # Add emtpy figure
         self.add_plot()
         # Add the toolbar
@@ -422,14 +420,6 @@ class PhemViewer(AGEDataViewer):
                         text += f"{row[l]},"
                     self.ax.text(x + 0.0002, np.max(spec), text[:-1], ha="left",
                                  va="top", rotation=90)
-            # Plot simulated spectrum
-            if self.simulation is not None:
-                x = np.linspace(*wlim, 1000)
-                y = self.simulation.spectrum(phex_dict, x, 0.02, "nm")
-                y = y / np.max(y) * np.max(spec)
-                # Scale x to xlim
-                x = x * a1 + a0
-                self.ax.plot(x, y, color=ageplot.colors[0])
             self.canvas.draw_idle()
 
     def next(self):

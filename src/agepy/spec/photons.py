@@ -176,7 +176,7 @@ class Spectrum:
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         background: Spectrum = None,
         calib: Tuple[float, float] = None,
-        uncertainties: str = "accurate",
+        uncertainties: str = "jacobi",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Notes
@@ -194,56 +194,81 @@ class Spectrum:
         det_image = det_image[det_image[:,1] < roi["y"]["max"]]
         # Don't need y values anymore
         det_image = det_image[:,0].flatten()
-        # Number of drawn samples
-        if uncertainties == "accurate":
-            n = 10000
-        elif uncertainties == "fast":
-            n = 100
-        else:
-            raise ValueError("Invalid value for uncertainties parameter.")
-        # Monte Carlo error propagation
-        mcerr = False
         # Apply spatial detector efficiency correction
-        eff_samples, x_inds = None, None
         if qeff is not None:
-            mcerr = True
             eff, eff_err, eff_xe = qeff
             x_inds = np.digitize(det_image, eff_xe[1:-1])
-            # Draw random samples
-            eff_samples = np.random.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
         # Prepare the calibration parameters
-        a0_samples, a1_samples = None, None
         if calib is not None:
-            a0, a1 = calib
-            if len(a0) == 2:
-                mcerr = True
-                a0_samples = np.random.normal(loc=a0[0], scale=a0[1], size=n)
-                a0 = a0[0]
-            if len(a1) == 2:
-                mcerr = True
-                a1_samples = np.random.normal(loc=a1[0], scale=a1[1], size=n)
-                a1 = a1[0]
+            a0 = calib[0]
+            a1 = calib[1]
         else:
-            a0, a1 = 0, 1
+            a0 = (0, 0)
+            a1 = (1, 0)
         # Adjust x roi filter to wavelength binning
-        wl_min = edges[edges > (a1 * roi["x"]["min"] + a0)][0]
-        wl_max = edges[edges < (a1 * roi["x"]["max"] + a0)][-1]
-        if not mcerr:
-            wl = a1 * det_image + a0
-            xroi = (wl >= wl_min) & (wl <= wl_max)
-            wl = wl[xroi]
-            spectrum = np.histogram(wl, bins=edges)[0]
+        wl_min = edges[edges > (a1[0] * roi["x"]["min"] + a0[0])][0]
+        wl_max = edges[edges < (a1[0] * roi["x"]["max"] + a0[0])][-1]
+        # Histogram data without the per event efficiencies
+        wl = a1[0] * det_image + a0[0]
+        xroi = (wl >= wl_min) & (wl <= wl_max)
+        wl = wl[xroi]
+        hist = np.histogram(wl, bins=edges)[0]
+        if calib is None and qeff is None:
+            spectrum = hist
             errors = np.sqrt(spectrum)
-        else:
-            if a0_samples is None:
-                a0_samples = np.ones(n) * a0
-            if a1_samples is None:
-                a1_samples = np.ones(n) * a1
-            if eff_samples is None:
+        elif uncertainties == "jacobi":
+            if qeff is None:
+
+                def sum_weights(a):
+                    # Convert x values to wavelengths
+                    wl = a[1] * det_image + a[0]
+                    xroi = (wl >= wl_min) & (wl <= wl_max)
+                    wl = wl[xroi]
+                    return np.histogram(wl, bins=edges)[0]
+
+                spectrum, errors = propagate(sum_weights, (a0[0], a1[0]), (a0[1]**2, a1[1]**2))
+                errors = np.sqrt(np.diag(errors))
+            else:
+
+                def sum_weights(eff, a0, a1):
+                    # Get the efficiencies for each point
+                    peff = eff[x_inds].flatten()
+                    nonzero = peff > 0
+                    peff[nonzero] = 1 / peff[nonzero]
+                    # Convert x values to wavelengths
+                    wl = a1 * det_image + a0
+                    xroi = (wl >= wl_min) & (wl <= wl_max)
+                    wl = wl[xroi]
+                    peff = peff[xroi]
+                    return np.histogram(wl, bins=edges, weights=peff)[0]
+
+                if calib is None:
+                    spectrum, errors = propagate(lambda x: sum_weights(x, a0[0], a1[0]), eff, eff_err**2)
+                    errors = np.sqrt(np.diag(errors))
+                else:
+                    x = np.append(eff, [a0[0], a1[0]])
+                    xcov = np.append(eff_err**2, [a0[1]**2, a1[1]**2])
+                    spectrum, errors = propagate(lambda x: sum_weights(x[:-2], x[-2], x[-1]), x, xcov)
+                    errors = np.sqrt(np.diag(errors))
+
+        elif uncertainties == "MonteCarlo":
+            n = 10000
+            # Create n samples of the calibration parameters
+            if calib is None:
+                a0_samples = np.zeros(n)
+                a1_samples = np.ones(n)
+            else:
+                a0_samples = np.random.normal(loc=a0[0], scale=a0[1], size=n)
+                a1_samples = np.random.normal(loc=a1[0], scale=a1[1], size=n)
+            # Create n samples of the efficiencies
+            if qeff is None:
                 eff_samples = np.ones((n, len(det_image)))
                 x_inds = np.arange(len(det_image))
+            else:
+                eff_samples = np.random.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
             # Initialize array for storing the sample results
             spectrum = np.zeros((n, len(edges) - 1))
+
             @njit(parallel=True)
             def sum_weights(spectrum):
                 for i in prange(n):
@@ -261,26 +286,29 @@ class Spectrum:
                     # Calculate the sum of weights for each bin, i.e. the weighted spectrum
                     spectrum[i] = numba_histogram(wl, edges, eff)
                 return spectrum
+
             # Calculate the weighted spectrum for each sample
             spectrum = sum_weights(spectrum)
             # Calculate mean and standard deviation of the sampled spectra
             errors = np.std(spectrum, axis=0)
             spectrum = np.mean(spectrum, axis=0)
-            # Histogram data without the per event efficiencies
-            hist = np.histogram(a1 * det_image + a0, bins=edges)[0]
-            # Calculate the uncertainties
+
+        # Include the Poisson uncertainties
+        if calib is not None or qeff is not None:
             nonzero = hist > 0
             per_bin_eff = np.ones_like(hist, dtype=float)
             per_bin_eff[nonzero] = spectrum[nonzero] / hist[nonzero]
             errors = np.sqrt(np.sqrt(hist)**2 * per_bin_eff**2 + errors**2)
+
         # Normalize data to measurement duration per step
         if self._t is not None:
             spectrum /= self._t
             errors /= self._t
+
         # Subtract background before further normalization
         if background is not None:
             bkg_spec, bkg_err = background.spectrum(
-                edges, roi=roi, qeff=qeff, calib=calib, uncertainties=uncertainties
+                edges, roi=roi, qeff=qeff, calib=calib, uncertainties="jacobi"
             )
             # Using just the statistical uncertainty of the background
             # counts would underestimate the uncertainty of the subtraction
@@ -288,6 +316,7 @@ class Spectrum:
             spectrum -= bkg_spec
             spectrum[spectrum < 0] = 0
             errors = np.sqrt(errors**2 + bkg_err**2)
+
         # Normalize data to account for beam intensity, gas 
         # pressure, etc.
         for norm in self._norm:
@@ -298,6 +327,7 @@ class Spectrum:
             else:
                 spectrum /= getattr(self, norm)
                 errors /= getattr(self, norm)
+
         # Return the spectrum and uncertainties
         return spectrum, errors
 
@@ -737,13 +767,12 @@ class EnergyScan(Scan):
         reference: pd.DataFrame,
         phem_label: Dict[str, Union[Sequence[str], int]],
         phex_label: Sequence[str],
-        wl_range: Tuple[float, float],
-        simulation: pd.DataFrame = None,
+        calib_guess: Tuple[float, float],
     ) -> None:
         """Calibrate the exciting-photon energies.
 
         """
-        app = AGEpp(PhemViewer, self, reference, phem_label, phex_label, wl_range, simulation)
+        app = AGEpp(PhemViewer, self, reference, phem_label, phex_label, calib_guess)
         app.run()
 
     def plot_phem(self,
