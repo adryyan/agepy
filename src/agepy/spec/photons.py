@@ -2,7 +2,7 @@
 
 """
 from __future__ import annotations
-from typing import Union, Tuple, Sequence, Dict
+from typing import Union, Tuple, Sequence, Dict, Literal
 from typing import TYPE_CHECKING
 import warnings
 
@@ -180,7 +180,7 @@ class Spectrum:
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         bkg: Union[Spectrum, np.ndarray] = None,
         calib: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-        err_prop: str = "jacobi",
+        err_prop: Literal["jacobi", "montecarlo", "none"] = "jacobi",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         
@@ -309,6 +309,16 @@ class Spectrum:
             errors = np.std(spectrum, axis=0)
             spectrum = np.mean(spectrum, axis=0)
 
+        elif err_prop == "none":
+            # Interpolate the efficiencies
+            if qeff is not None:
+                eff = interp(eff_val)
+            else:
+                eff = None
+            # Convert x values to wavelengths and histogram the data
+            spectrum = np.histogram(a1[0] * data + a0[0], bins=edges, weights=eff)[0]
+            errors = np.zeros_like(spectrum)
+
         # Include the Poisson uncertainties
         if calib is not None or qeff is not None:
             nonzero = hist > 0
@@ -324,7 +334,7 @@ class Spectrum:
         # Subtract background before further normalization
         if isinstance(bkg, Spectrum):
             bkg_spec, bkg_err = bkg.spectrum(
-                edges, roi=roi, qeff=qeff, calib=calib, err_prop="jacobi"
+                edges, roi=roi, qeff=qeff, calib=calib, err_prop="none"
             )
             # Using just the statistical uncertainty of the background
             # counts would underestimate the uncertainty of the subtraction
@@ -892,7 +902,7 @@ class EnergyScan(Scan):
         bkg: bool = True,
         calib: bool = True,
         norm_phex: bool = False,
-        uncertainties: str = "accurate",
+        err_prop: str = "jacobi",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get the spectrum with assigned energies.
 
@@ -946,7 +956,7 @@ class EnergyScan(Scan):
         spec = np.zeros(len(edges) - 1)
         err = np.zeros(len(edges) - 1)
         for idx in step_idx:
-            s, e = self.spectra[idx].spectrum(edges, roi=self.roi, qeff=qeff, background=bkg, calib=calib, uncertainties=uncertainties)
+            s, e = self.spectra[idx].spectrum(edges, roi=self.roi, qeff=qeff, bkg=bkg, calib=calib, err_prop=err_prop)
             if norm_phex:
                 s /= fit_val[0]
                 e = np.sqrt(e**2 / fit_val[0]**2 + s**2 * fit_err[0]**2 / fit_val[0]**4)
@@ -1006,7 +1016,7 @@ class EnergyScan(Scan):
                 yedges,
                 roi=self.roi,
                 qeff=qeff,
-                background=bkg,
+                bkg=bkg,
                 calib=calib,
             )[0]
         # Normalize the map
