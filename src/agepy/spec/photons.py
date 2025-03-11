@@ -253,19 +253,20 @@ class Spectrum:
 
         elif uncertainties == "MonteCarlo":
             n = 10000
+            rng = np.random.default_rng()
             # Create n samples of the calibration parameters
             if calib is None:
                 a0_samples = np.zeros(n)
                 a1_samples = np.ones(n)
             else:
-                a0_samples = np.random.normal(loc=a0[0], scale=a0[1], size=n)
-                a1_samples = np.random.normal(loc=a1[0], scale=a1[1], size=n)
+                a0_samples = rng.normal(loc=a0[0], scale=a0[1], size=n)
+                a1_samples = rng.normal(loc=a1[0], scale=a1[1], size=n)
             # Create n samples of the efficiencies
             if qeff is None:
                 eff_samples = np.ones((n, len(det_image)))
                 x_inds = np.arange(len(det_image))
             else:
-                eff_samples = np.random.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
+                eff_samples = rng.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
             # Initialize array for storing the sample results
             spectrum = np.zeros((n, len(edges) - 1))
 
@@ -1052,7 +1053,8 @@ class QEffScan(Scan):
             return spl(x)
         # Generate samples
         n = 10000
-        y_samples = np.random.normal(loc=py, scale=pyerr, size=(n, len(py)))
+        rng = np.random.default_rng()
+        y_samples = rng.normal(loc=py, scale=pyerr, size=(n, len(py)))
         eff_samples = np.stack([interp(y) for y in y_samples], axis=0)
         # Calculate the mean and standard deviation
         eff = np.mean(eff_samples, axis=0)
