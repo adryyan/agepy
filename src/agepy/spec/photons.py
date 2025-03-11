@@ -50,7 +50,7 @@ def compute_bin(x, bin_edges):
 
 @njit()
 def numba_histogram(data, bin_edges, weights):
-    hist = np.zeros((bin_edges.shape[0] - 1,), dtype=np.intp)
+    hist = np.zeros((bin_edges.shape[0] - 1,), dtype=np.float64)
 
     for x, w in zip(data.flat, weights.flat):
         bin = compute_bin(x, bin_edges)
@@ -99,7 +99,11 @@ class Spectrum:
             for key, h5path in norm.items():
                 if h5path not in h5:
                     raise ValueError("Normalization parameter not found.")
-                norm[key] = h5[h5path + "/0"][0]
+                if h5path.endswith("avg"):
+                    norm[key] = h5[h5path + "/0"][0]
+                else:
+                    values = np.asarray(h5[h5path + "/0/0.0"])
+                    norm[key] = np.array([np.mean(values), np.std(values)]).flatten()
         # Initialize the Spectrum
         return cls(anode.process(raw), time=time, **norm)
 
@@ -174,85 +178,99 @@ class Spectrum:
         edges: np.ndarray,
         roi: dict = None,
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
-        background: Spectrum = None,
-        calib: Tuple[float, float] = None,
-        uncertainties: str = "jacobi",
+        bkg: Union[Spectrum, np.ndarray] = None,
+        calib: Tuple[Tuple[float, float], Tuple[float, float]] = None,
+        err_prop: str = "jacobi",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Notes
-        -----
-        - Implement handling of the uncertainties of the efficiency map
-        - Background subtraction is very primitive and uncertainties are
-          not propagated correctly
+        
         """
-        det_image = np.copy(self._xy)
+        data = np.copy(self._xy)
         # Define the roi as the full detector if not provided
         if roi is None:
             roi = {"x": {"min": 0, "max": 1}, "y": {"min": 0, "max": 1}}
         # Apply y roi filter
-        det_image = det_image[det_image[:,1] > roi["y"]["min"]]
-        det_image = det_image[det_image[:,1] < roi["y"]["max"]]
+        data = data[data[:,1] > roi["y"]["min"]]
+        data = data[data[:,1] < roi["y"]["max"]]
         # Don't need y values anymore
-        det_image = det_image[:,0].flatten()
-        # Apply spatial detector efficiency correction
-        if qeff is not None:
-            eff, eff_err, eff_xe = qeff
-            x_inds = np.digitize(det_image, eff_xe[1:-1])
-        # Prepare the calibration parameters
+        data = data[:,0].flatten()
+
+        # Prepare the wavelength calibration parameters
         if calib is not None:
             a0 = calib[0]
             a1 = calib[1]
         else:
             a0 = (0, 0)
             a1 = (1, 0)
+
         # Adjust x roi filter to wavelength binning
         wl_min = edges[edges > (a1[0] * roi["x"]["min"] + a0[0])][0]
         wl_max = edges[edges < (a1[0] * roi["x"]["max"] + a0[0])][-1]
+        # Convert x values to wavelengths
+        wl_data = a1[0] * data + a0[0]
+        # Apply x roi filter
+        xroi = (wl_data >= wl_min) & (wl_data <= wl_max)
+        data = data[xroi]
+        wl_data = wl_data[xroi]
         # Histogram data without the per event efficiencies
-        wl = a1[0] * det_image + a0[0]
-        xroi = (wl >= wl_min) & (wl <= wl_max)
-        wl = wl[xroi]
-        hist = np.histogram(wl, bins=edges)[0]
+        hist = np.histogram(wl_data, bins=edges)[0]
+
+        # Prepare spatial detector efficiency correction
+        if qeff is not None:
+            eff_val, eff_err, eff_x = qeff
+            # Define x values for interpolation
+            xedges = np.histogram([], bins=512, range=(0, 1))[1]
+            xvalues = (xedges[1:] + xedges[:-1]) * 0.5
+
+            def interp(y):
+                spl = CubicSpline(eff_x, y, bc_type="natural")
+                return spl(xvalues)
+
+            # Assign the efficiencies to the data points
+            eff_inds = np.digitize(data, xedges[1:-1])
+
         if calib is None and qeff is None:
             spectrum = hist
             errors = np.sqrt(spectrum)
-        elif uncertainties == "jacobi":
+        elif err_prop == "jacobi":
+            # Propagate the uncertainties of the calibration and efficiencies
+            # using a numerically calculated Jacobian matrix
             if qeff is None:
 
-                def sum_weights(a):
-                    # Convert x values to wavelengths
-                    wl = a[1] * det_image + a[0]
-                    xroi = (wl >= wl_min) & (wl <= wl_max)
-                    wl = wl[xroi]
-                    return np.histogram(wl, bins=edges)[0]
+                def calc_spectrum(a):
+                    # Convert x values to wavelengths and histogram the data
+                    return np.histogram(a[1] * data + a[0], bins=edges)[0]
 
-                spectrum, errors = propagate(sum_weights, (a0[0], a1[0]), (a0[1]**2, a1[1]**2))
+                spectrum, errors = propagate(calc_spectrum, (a0[0], a1[0]), (a0[1]**2, a1[1]**2))
                 errors = np.sqrt(np.diag(errors))
             else:
+                # Interpolate the efficiencies to get a smoother spectrum
+                n = 10000
+                rng = np.random.default_rng()
+                eff_samples = rng.normal(loc=eff_val, scale=eff_err, size=(n, len(eff_val)))
+                eff_samples = np.stack([interp(y) for y in eff_samples], axis=0)
+                # Calculate the mean and standard deviation
+                eff_val = np.mean(eff_samples, axis=0)
+                eff_err = np.std(eff_samples, axis=0)
 
-                def sum_weights(eff, a0, a1):
+                def calc_spectrum(eff, a):
                     # Get the efficiencies for each point
-                    peff = eff[x_inds].flatten()
-                    nonzero = peff > 0
-                    peff[nonzero] = 1 / peff[nonzero]
+                    eff = 1 / eff[eff_inds].flatten()
                     # Convert x values to wavelengths
-                    wl = a1 * det_image + a0
-                    xroi = (wl >= wl_min) & (wl <= wl_max)
-                    wl = wl[xroi]
-                    peff = peff[xroi]
-                    return np.histogram(wl, bins=edges, weights=peff)[0]
+                    wl_data = a[1] * data + a[0]
+                    return np.histogram(wl_data, bins=edges, weights=eff)[0]
 
                 if calib is None:
-                    spectrum, errors = propagate(lambda x: sum_weights(x, a0[0], a1[0]), eff, eff_err**2)
+                    spectrum, errors = propagate(lambda x: calc_spectrum(x, (a0[0], a1[0])), eff_val, eff_err**2)
                     errors = np.sqrt(np.diag(errors))
                 else:
-                    x = np.append(eff, [a0[0], a1[0]])
-                    xcov = np.append(eff_err**2, [a0[1]**2, a1[1]**2])
-                    spectrum, errors = propagate(lambda x: sum_weights(x[:-2], x[-2], x[-1]), x, xcov)
+                    values = np.append(eff_val, [a0[0], a1[0]])
+                    cov = np.append(eff_err**2, [a0[1]**2, a1[1]**2])
+                    spectrum, errors = propagate(lambda x: calc_spectrum(x[:-2], x[-2:]), values, cov)
                     errors = np.sqrt(np.diag(errors))
 
-        elif uncertainties == "MonteCarlo":
-            n = 10000
+        elif err_prop == "montecarlo":
+            n = 100000
             rng = np.random.default_rng()
             # Create n samples of the calibration parameters
             if calib is None:
@@ -264,32 +282,29 @@ class Spectrum:
             # Create n samples of the efficiencies
             if qeff is None:
                 eff_samples = np.ones((n, len(det_image)))
-                x_inds = np.arange(len(det_image))
+                eff_inds = np.arange(len(det_image))
             else:
-                eff_samples = rng.normal(loc=eff, scale=eff_err, size=(n, len(eff)))
+                # Create n samples of the efficiencies
+                eff_samples = rng.normal(loc=eff_val, scale=eff_err, size=(n, len(eff_val)))
+                # Interpolate the efficiencies to get a smoother spectrum
+                eff_samples = np.stack([interp(y) for y in eff_samples], axis=0)
+
             # Initialize array for storing the sample results
-            spectrum = np.zeros((n, len(edges) - 1))
+            spectrum = np.zeros((n, len(edges) - 1), dtype=np.float64)
 
             @njit(parallel=True)
-            def sum_weights(spectrum):
+            def calc_spectrum(spectrum):
                 for i in prange(n):
                     # Get the efficiencies for each point
-                    eff = eff_samples[i][x_inds].flatten()
-                    nonzero = eff > 0
-                    eff[nonzero] = 1 / eff[nonzero]
+                    eff = 1 / eff_samples[i][eff_inds].flatten()
                     # Convert x values to wavelengths
-                    wl = a1_samples[i] * det_image + a0_samples[i]
-                    # Adjust x roi filter to wavelength binning
-                    xroi = (wl >= wl_min) & (wl <= wl_max)
-                    # Apply x roi filter
-                    wl = wl[xroi]
-                    eff = eff[xroi]
+                    wl_data = a1_samples[i] * data + a0_samples[i]
                     # Calculate the sum of weights for each bin, i.e. the weighted spectrum
-                    spectrum[i] = numba_histogram(wl, edges, eff)
+                    spectrum[i] = numba_histogram(wl_data, edges, eff)
                 return spectrum
 
             # Calculate the weighted spectrum for each sample
-            spectrum = sum_weights(spectrum)
+            spectrum = calc_spectrum(spectrum)
             # Calculate mean and standard deviation of the sampled spectra
             errors = np.std(spectrum, axis=0)
             spectrum = np.mean(spectrum, axis=0)
@@ -297,7 +312,7 @@ class Spectrum:
         # Include the Poisson uncertainties
         if calib is not None or qeff is not None:
             nonzero = hist > 0
-            per_bin_eff = np.ones_like(hist, dtype=float)
+            per_bin_eff = np.ones_like(hist, dtype=np.float64)
             per_bin_eff[nonzero] = spectrum[nonzero] / hist[nonzero]
             errors = np.sqrt(np.sqrt(hist)**2 * per_bin_eff**2 + errors**2)
 
@@ -307,14 +322,21 @@ class Spectrum:
             errors /= self._t
 
         # Subtract background before further normalization
-        if background is not None:
-            bkg_spec, bkg_err = background.spectrum(
-                edges, roi=roi, qeff=qeff, calib=calib, uncertainties="jacobi"
+        if isinstance(bkg, Spectrum):
+            bkg_spec, bkg_err = bkg.spectrum(
+                edges, roi=roi, qeff=qeff, calib=calib, err_prop="jacobi"
             )
             # Using just the statistical uncertainty of the background
             # counts would underestimate the uncertainty of the subtraction
             bkg_err = np.sqrt(bkg_spec * self._t) / self._t
             spectrum -= bkg_spec
+            spectrum[spectrum < 0] = 0
+            errors = np.sqrt(errors**2 + bkg_err**2)
+        elif isinstance(bkg, np.ndarray):
+            if len(bkg) != len(spectrum):
+                raise ValueError("Background spectrum must have the same length as the data.")
+            bkg_err = np.sqrt(bkg * self._t) / self._t
+            spectrum -= bkg
             spectrum[spectrum < 0] = 0
             errors = np.sqrt(errors**2 + bkg_err**2)
 
