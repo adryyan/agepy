@@ -382,7 +382,7 @@ class Spectrum:
                     errors = np.sqrt(np.diag(errors))
 
         elif err_prop == "montecarlo":
-            n = 100000
+            n = 50000
             rng = np.random.default_rng()
             # Create n samples of the calibration parameters
             if calib is None:
@@ -396,10 +396,12 @@ class Spectrum:
                 eff_samples = np.ones((n, len(det_image)))
                 eff_inds = np.arange(len(det_image))
             else:
-                # Create n samples of the efficiencies
                 eff_samples = rng.normal(loc=eff_val, scale=eff_err, size=(n, len(eff_val)))
                 # Interpolate the efficiencies to get a smoother spectrum
                 eff_samples = np.stack([interp(y) for y in eff_samples], axis=0)
+            # Draw n times from a Poisson distribution
+            poisson_samples = rng.poisson(lam=len(data), size=n)
+            poisson_inds = rng.integers(0, len(data), size=(n, np.max(poisson_samples)), dtype=np.uint32)
 
             # Initialize array for storing the sample results
             spectrum = np.zeros((n, len(edges) - 1), dtype=np.float64)
@@ -408,11 +410,14 @@ class Spectrum:
             def calc_spectrum(spectrum):
                 for i in prange(n):
                     # Get the efficiencies for each point
-                    eff = 1 / eff_samples[i][eff_inds].flatten()
+                    eff_sample = 1 / eff_samples[i][eff_inds].flatten()
+                    # Select points based on the Poisson samples
+                    data_sample = data[poisson_inds[i][:poisson_samples[i]]]
+                    eff_sample = eff_sample[poisson_inds[i][:poisson_samples[i]]]
                     # Convert x values to wavelengths
-                    wl_data = a1_samples[i] * data + a0_samples[i]
+                    wl_data = a1_samples[i] * data_sample + a0_samples[i]
                     # Calculate the sum of weights for each bin, i.e. the weighted spectrum
-                    spectrum[i] = numba_histogram(wl_data, edges, eff)
+                    spectrum[i] = numba_histogram(wl_data, edges, eff_sample)
                 return spectrum
 
             # Calculate the weighted spectrum for each sample
@@ -425,6 +430,7 @@ class Spectrum:
             # Interpolate the efficiencies
             if qeff is not None:
                 eff = interp(eff_val)
+                eff = 1 / eff[eff_inds]
             else:
                 eff = None
             # Convert x values to wavelengths and histogram the data
@@ -435,7 +441,7 @@ class Spectrum:
             raise ValueError("Error propagation method must be 'jacobi', 'montecarlo', or 'none'.")
 
         # Include the Poisson uncertainties
-        if calib is not None or qeff is not None:
+        if (calib is not None or qeff is not None) and err_prop != "montecarlo":
             nonzero = hist > 0
             per_bin_eff = np.ones_like(hist, dtype=np.float64)
             per_bin_eff[nonzero] = spectrum[nonzero] / hist[nonzero]
@@ -621,36 +627,49 @@ class BaseScan:
         return spectra, step_val
 
     def counts(self,
-        roi: dict = None,
+        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: bool = True,
-        xrange: Tuple[float, float] = None,
+        bkg: bool = True,
+        step_range: Tuple[float, float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get the photon-excitation energy spectrum.
 
         Parameters
         ----------
-        roi: dict, optional
-            Ignore set region of interest and use the provided one instead. 
+        roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
+            Region of interest for the detector in the form
+            `((xmin, xmax), (ymin, ymax))`. Defaults to the roi set for
+            the `Scan` instance.
+        qeff: bool, optional
+            Whether to apply the spatial detector efficiencies if
+            available.
+        bkg: bool, optional
+            Whether to subtract the background spectrum if available.
+        step_range: Tuple[float, float], optional
+            Range of step values to consider. If None, all steps are
+            used.
 
         Returns
         -------
         Tuple[np.ndarray, np.ndarray, np.ndarray]
             The number of counts (normalized), the respective
-            statistical uncertainties, and the exciting-photon energies.
+            uncertainties, and the corresponding step values.
 
         """
+        # Get the roi attribute of the Scan instance if not provided
         if roi is None:
             roi = self.roi
+
+        # Get the efficiencies if available and requested
         if self.qeff is None or not qeff:
             qeff = None
         else:
-            edges = np.histogram([], bins=512, range=(0, 1))[1]
-            qeff = (*self.qeff.efficiencies(edges), edges)
+            qeff = self.qeff.efficiencies()
 
         vectorized_counts = np.vectorize(
             lambda spec: spec.counts(roi=roi, qeff=qeff, background=self.bkg)
         )
-        if xrange is not None:
+        if step_range is not None:
             mask = (self.steps >= xrange[0]) & (self.steps <= xrange[1])
             n, err = vectorized_counts(self.spectra[mask])
             return n, err, self.steps[mask]
