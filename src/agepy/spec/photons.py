@@ -416,7 +416,8 @@ class Spectrum:
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         bkg: Union[Spectrum, np.ndarray] = None,
         calib: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-        err_prop: Literal["jacobi", "montecarlo", "none"] = "jacobi",
+        err_prop: Literal["montecarlo", "none"] = "montecarlo",
+        mc_samples: int = 10000,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
@@ -450,7 +451,10 @@ class Spectrum:
             Error propagation method for handling the uncertainties of
             the efficiencies and the wavelength calibration. If
             `qeff = None` and `calib = None`, this setting has no
-            effect. Can be 'jacobi', 'montecarlo', or 'none'.
+            effect. Can be 'montecarlo', or 'none'.
+        mc_samples: int, optional
+            Number of Monte Carlo samples to use for error propagation.
+            Has no effect if `err_prop = 'none'`.
 
         Returns
         -------
@@ -535,26 +539,24 @@ class Spectrum:
             errors = np.sqrt(spectrum)
 
         elif err_prop == "montecarlo":
-            # Define the number of samples
-            n = 500000
             # Initialize the random number generator
             rng = np.random.default_rng()
 
             # Initialize array for storing the sample results
-            spectrum = np.zeros((n, len(edges) - 1), dtype=np.float64)
+            spectrum = np.zeros((mc_samples, len(edges) - 1), dtype=np.float64)
 
             # Perform the Monte Carlo simulation
             if qeff is None and bkg is None:
-                spectrum = _mc_calibrated_spectrum(spectrum, data, edges, calib_params, rng, n)
+                spectrum = _mc_calibrated_spectrum(spectrum, data, edges, calib_params, rng, mc_samples)
             elif qeff is None:
                 spectrum = _mc_calibrated_spectrum_with_bkg(
-                    spectrum, (data, self._t), edges, bkg, calib_params, rng, n)
+                    spectrum, (data, self._t), edges, bkg, calib_params, rng, mc_samples)
             elif bkg is None:
                 spectrum = _mc_calibrated_spectrum_with_qeff(
-                    spectrum, data, edges, qeff, calib_params, rng, n)
+                    spectrum, data, edges, qeff, calib_params, rng, mc_samples)
             else:
                 spectrum = _mc_calibrated_spectrum_with_bkg_qeff(
-                    spectrum, (data, self._t), edges, bkg, qeff, calib_params, rng, n)
+                    spectrum, (data, self._t), edges, bkg, qeff, calib_params, rng, mc_samples)
 
             # Calculate mean and standard deviation of the sampled spectra
             errors = np.std(spectrum, ddof=1, axis=0)
@@ -611,7 +613,7 @@ class Spectrum:
                 spectrum[spectrum < 0] = 0
 
         else:
-            raise ValueError("Error propagation method must be 'montecarlo', or 'none'.")
+            raise ValueError("Error propagation method must be 'montecarlo' or 'none'.")
 
         # Normalize data to measurement duration per step
         if self._t is not None:
