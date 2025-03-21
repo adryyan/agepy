@@ -186,7 +186,7 @@ def _mc_calibrated_spectrum_with_bkg_qeff(output, data, edges, bkg, qeff, calib,
     # Determine the number of background data points to draw
     bkg_sample_size = int(len(bkg[0]) / bkg[1] * data[1])
     # Calculate the background distribution
-    bkg_pdf = numba_histogram(bkg[0], xedges, np.ones_like(bkg[0]))
+    bkg_pdf = numba_histogram(bkg[0], xedges)
     # Assign the background probabilities to the data points
     bkg_prob = bkg_pdf[eff_inds]
 
@@ -474,6 +474,30 @@ class Spectrum:
         # Don't need y values anymore
         data = data[:,0].flatten()
 
+        # Prepare the background subtraction
+        if isinstance(bkg, Spectrum):
+            # Get the measurement duration of the background
+            bkg_t = bkg._t
+            # Test if background and data both have a time value
+            if bkg_t is None or self._t is None:
+                raise ValueError("Both background and data must have a time value.")
+
+            # Get the x and y values of the background spectrum
+            bkg_data = bkg._xy
+
+            # Apply y roi filter
+            bkg_data = bkg_data[bkg_data[:,1] > roi[1][0]]
+            bkg_data = bkg_data[bkg_data[:,1] < roi[1][1]]
+            # Don't need y values anymore
+            bkg_data = bkg_data[:,0].flatten()
+
+            # Prepare the background to be passed to the spectrum calculation
+            bkg = (bkg_data, bkg_t)
+
+        else:
+            # Continue without background subtraction
+            bkg = None
+
         # Prepare the wavelength calibration parameters
         if calib is not None:
             try:
@@ -509,30 +533,6 @@ class Spectrum:
                 raise ValueError("Detector efficiencies must be provided as (values, errors, x).")
 
             qeff = (qeff_val, qeff_err, qeff_x)
-
-        # Prepare the background subtraction
-        if isinstance(bkg, Spectrum):
-            # Get the measurement duration of the background
-            bkg_t = bkg._t
-            # Test if background and data both have a time value
-            if bkg_t is None or self._t is None:
-                raise ValueError("Both background and data must have a time value.")
-
-            # Get the x and y values of the background spectrum
-            bkg_data = bkg._xy
-
-            # Apply y roi filter
-            bkg_data = bkg_data[bkg_data[:,1] > roi[1][0]]
-            bkg_data = bkg_data[bkg_data[:,1] < roi[1][1]]
-            # Don't need y values anymore
-            bkg_data = bkg_data[:,0].flatten()
-
-            # Prepare the background to be passed to the spectrum calculation
-            bkg = (bkg_data, bkg_t)
-
-        else:
-            # Continue without background subtraction
-            bkg = None
 
         if calib is None and qeff is None and bkg is None:
             spectrum = np.histogram(data, bins=edges)[0]
