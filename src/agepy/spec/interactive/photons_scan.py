@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import warnings
 
 # Import importlib.resources for getting the icon paths
@@ -7,7 +6,7 @@ from importlib.resources import path as ilrpath
 
 # Import PySide6 / PyQt6 modules
 try:
-    from PySide6 import QtWidgets, QtCore, QtGui
+    from PySide6 import QtGui
 
     qt_binding = "PySide6"
 
@@ -15,7 +14,7 @@ except ImportError:
     warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
 
     try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
+        from PyQt6 import QtGui
 
         qt_binding = "PyQt6"
 
@@ -27,6 +26,7 @@ from agepy.interactive import MainWindow
 from agepy import ageplot
 
 # Import modules for type hinting
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agepy.spec.photons import Scan
     import numpy as np
