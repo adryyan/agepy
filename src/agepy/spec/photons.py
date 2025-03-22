@@ -1424,6 +1424,7 @@ class EnergyScan(Scan):
     def __init__(self,
         data_files: Sequence[str],
         anode: PositionAnode,
+        energy_uncertainty: Union[np.ndarray, float],
         energies: str = None,
         raw: str = "dld_rd#raw",
         time_per_step: Union[int, Sequence[int]] = None,
@@ -1435,18 +1436,60 @@ class EnergyScan(Scan):
         )
 
         # Set attributes
-        self.phex_assignments = None
-        self.phex_label = None
-        self.phem_assignments = None
-        self.phem_label = None
+        self.energy_uncertainty = energy_uncertainty
+        self._phex_assignments = None
+        self._phex_label = None
+        self._phem_assignments = None
+        self._phem_label = None
 
     @property
     def energies(self) -> np.ndarray:
-        return self.steps
+        return self._steps
 
     @energies.setter
     def energies(self, value: np.ndarray) -> None:
         self.steps = value
+
+    @property
+    def energy_uncertainty(self) -> np.ndarray:
+        return self._energy_uncertainty
+
+    @energy_uncertainty.setter
+    def energy_uncertainty(self, value: Union[np.ndarray, float]) -> None:
+        if value is None:
+            self._energy_uncertainty = None
+            return
+
+        if isinstance(value, np.ndarray):
+            if value.shape == (len(self.spectra),):
+                self._energy_uncertainty = value
+
+            else:
+                raise ValueError(
+                    "Uncertainties must be of the same length as spectra."
+                )
+
+        elif isinstance(value, (int, float)):
+            self._energy_uncertainty = np.full(
+                len(self._steps), value, dtype=np.float64
+            )
+
+        else:
+            raise ValueError("Uncertainties must be a numpy array or a float.")
+
+    def assign_phex(self,
+        reference: pd.DataFrame,
+        label: Dict[str, Union[Sequence[str], int]],
+        energy_range: float,
+    ) -> None:
+        from agepy.interactive import run
+        from agepy.spec.interactive.photons_phex import AssignPhex
+
+        # Intialize the viewer
+        mw = AssignPhex(self, reference, label, energy_range)
+
+        # Run the application
+        run(mw)
 
     def phexphem(self,
         xedges: np.ndarray = None,
