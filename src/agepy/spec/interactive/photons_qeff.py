@@ -1,9 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import warnings
-
-# Import importlib.resources for getting the icon paths
-from importlib.resources import path as ilrpath
 
 # Import PySide6 / PyQt6 modules
 try:
@@ -26,35 +22,34 @@ except ImportError:
 try:
     from iminuit import Minuit, cost
     from iminuit.qtwidget import make_widget
+    from numba_stats import (
+        bernstein,
+        norm,
+        truncexpon,
+        uniform,
+        voigt,
+        cruijff,
+        crystalball,
+        crystalball_ex,
+        qgaussian
+    )
 
 except ImportError:
-    raise ImportError("iminuit not installed. Please install for fitting.")
+    raise ImportError("iminuit and numba_stats required for fitting.")
 
 import numpy as np
 import numba as nb
-from numba_stats import (
-    bernstein,
-    norm,
-    truncexpon,
-    uniform,
-    voigt,
-    cruijff,
-    crystalball,
-    crystalball_ex,
-    qgaussian
-)
 
 # Import internal modules
 from agepy.spec.interactive.photons_scan import SpectrumViewer
 
 # Import modules for type hinting
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agepy.spec.photons import Scan
     from matplotlib.backend_bases import MouseEvent
-    from typing import Sequence, Tuple, Dict, Union
-    from matplotlib.axes import Axes
-    from matplotlib.lines import Line2D
-    from numpy.typing import ArrayLike, NDArray
+    from typing import Tuple
+    from numpy.typing import NDArray
 
 
 __all__ = ["EvalQEff"]
