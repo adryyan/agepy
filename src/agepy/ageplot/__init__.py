@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
 age_styles = ["age", "tex", "nature", "prl", "pccp", "powerpoint",
-              "latexbeamer", "dataviewer"]
+              "latexbeamer", "interactive"]
 mpl_styles = ["default"]
 mpl_styles.extend(plt.style.available)
 
