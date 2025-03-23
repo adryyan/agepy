@@ -1492,14 +1492,17 @@ class EnergyScan(Scan):
         run(mw)
 
     def assign_phem(self,
-        edges: np.ndarray,
         reference: pd.DataFrame,
         phem_label: Dict[str, Union[Sequence[str], int]],
         phex_label: Dict[str, Union[Sequence[str], int]],
         calib_guess: Tuple[float, float],
+        bins: int = 512,
     ) -> None:
         from agepy.interactive import run
         from agepy.spec.interactive.photons_phem import AssignPhem
+
+        # Create the bin edges
+        edges = np.histogram([], bins=bins, range=(0, 1))[1]
 
         # Intialize the viewer
         mw = AssignPhem(
