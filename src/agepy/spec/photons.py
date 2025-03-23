@@ -1491,6 +1491,24 @@ class EnergyScan(Scan):
         # Run the application
         run(mw)
 
+    def assign_phem(self,
+        edges: np.ndarray,
+        reference: pd.DataFrame,
+        phem_label: Dict[str, Union[Sequence[str], int]],
+        phex_label: Dict[str, Union[Sequence[str], int]],
+        calib_guess: Tuple[float, float],
+    ) -> None:
+        from agepy.interactive import run
+        from agepy.spec.interactive.photons_phem import AssignPhem
+
+        # Intialize the viewer
+        mw = AssignPhem(
+            self, edges, reference, phem_label, phex_label, calib_guess
+        )
+
+        # Run the application
+        run(mw)
+
     def phexphem(self,
         xedges: np.ndarray = None,
         yedges: np.ndarray = None,
