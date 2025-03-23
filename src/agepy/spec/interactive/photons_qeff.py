@@ -60,7 +60,7 @@ class EvalQEff(SpectrumViewer):
 
     """
 
-    def __init__(self, scan: Scan, edges: np.ndarray, mc_samples) -> None:
+    def __init__(self, scan: Scan, edges: np.ndarray, mc_samples: int) -> None:
         # Set up the main window
         super().__init__(scan, edges)
 
@@ -153,7 +153,6 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Initialize the parameters and limits
         self.params = {}
-        self.limits = {}
 
         # jit compile the numerical integration of the pdf
 
@@ -254,6 +253,7 @@ class InteractiveFit(QtWidgets.QDialog):
             limits = sig_limits
 
             # Set the model
+
             def integral(x, *args):
                 return sig_integral(x, args)
 

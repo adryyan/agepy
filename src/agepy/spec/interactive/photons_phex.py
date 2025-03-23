@@ -381,9 +381,8 @@ class InteractiveFit(QtWidgets.QDialog):
         if bkg not in self.bkg_models.keys():
             raise ValueError(f"Background model {bkg} not found.")
 
-        # Initialize the parameters and limits
+        # Initialize the parameters
         self.params = {}
-        self.limits = {}
 
         # Initialize the parent class
         super().__init__(parent)

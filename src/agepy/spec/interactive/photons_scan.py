@@ -134,7 +134,7 @@ class SpectrumViewer(MainWindow):
             self.canvas.draw_idle()
 
     def plot_previous(self) -> None:
-        if self.step < 0:
+        if self.step - 1 < 0:
             return
 
         self.step -= 1
