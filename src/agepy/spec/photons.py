@@ -849,7 +849,7 @@ class BaseScan:
             else:
                 return None
 
-        elif isinstance(roi, tuple):
+        else:
             try:
                 roi = np.array(roi, dtype=np.float64)
                 assert roi.shape == (2, 2)
@@ -861,9 +861,6 @@ class BaseScan:
                 )
 
             return roi
-
-        else:
-            raise ValueError("roi could not be parsed.")
 
     def select_step_range(self,
         step_range: Tuple[float, float],
@@ -995,9 +992,9 @@ class BaseScan:
         mask = mask[inds]
 
         # Remove the steps
-        self.steps = np.delete(self.steps, mask)
-        self.spectra = np.delete(self.spectra, mask)
-        self.id = np.delete(self.id, mask)
+        self._steps = np.delete(self.steps, mask)
+        self._spectra = np.delete(self.spectra, mask)
+        self._id = np.delete(self.id, mask)
 
     def save(self, filepath: str) -> None:
         """
