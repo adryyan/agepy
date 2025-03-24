@@ -1795,6 +1795,14 @@ class EnergyScan(Scan):
 
         return None, None
 
+    def save_calib(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self.calib, f)
+
+    def load_calib(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self.calib = pickle.load(f)
+
     def assigned_spectrum(self,
         phex: Dict[str, Union[str, int]],
         edges: np.ndarray,
