@@ -10,6 +10,7 @@ import pickle
 import numpy as np
 from numba import njit, prange
 from jacobi import propagate
+from scipy.stats import norm
 import pandas as pd
 import matplotlib.pyplot as plt
 import h5py
@@ -1359,18 +1360,12 @@ class Scan(BaseScan):
             The spectrum and its uncertainties.
 
         """
-        # Parse the given calculation options
-        roi = self.prepare_roi(roi)
-        qeff = self.prepare_qeff(qeff)
-        bkg = self.prepare_bkg(bkg)
-        calib = self.prepare_calib(calib)
+        # Find the index of the step closest to the given value
+        idx = np.argmin(np.abs(self.steps - step))
 
-        # Find the spectrum at the step closest to the given value
-        spec = self.spectra[np.argmin(np.abs(self.steps - step))]
-
-        return spec.spectrum(
-            edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib, err_prop=err_prop,
-            mc_samples=mc_samples
+        return self.spectrum_at(
+            idx, edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib,
+            err_prop=err_prop, mc_samples=mc_samples
         )
 
     def show_spectra(self):
@@ -1491,6 +1486,143 @@ class EnergyScan(Scan):
         # Run the application
         run(mw)
 
+    def save_phex(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self._phex_assignments, f)
+
+    def load_phex(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self._phex_assignments = pickle.load(f)
+
+    def eval_phex(self,
+        reference: pd.DataFrame,
+        plot: bool = True,
+        plot_pulls: bool = True,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        # Create a list of fit values and reference values
+        fit_energies = []
+        ref_energies = []
+        labels = []
+
+        # Find matching transitions
+        for i, row in self._phex_assignments.iterrows():
+            ref = reference.copy()
+
+            # Look for the excitation in the reference data
+            label = ""
+            for key, value in row.items():
+                # Skip the fit values
+                if key in ["E", "val", "err"]:
+                    continue
+
+                ref.query(f"{key} == @value", inplace=True)
+
+                # Check if matching entries remain
+                if ref.empty:
+                    continue
+
+                label += f"{key} = {value}, "
+
+            # Remove the last comma and space
+            label = label[:-2]
+
+            # Append the found match
+            fit_energies.append([row["val"][1], row["err"][1]])
+            ref_energies.append(ref["E"].iloc[0])
+            labels.append(label)
+
+        # Convert to numpy arrays
+        fit_energies = np.array(fit_energies)
+        ref_energies = np.array(ref_energies)
+        labels = np.array(labels)
+
+        # Sort by calibration energies
+        idx = np.argsort(ref_energies)
+        ref_energies = ref_energies[idx]
+        fit_energies = fit_energies[idx]
+        labels = labels[idx]
+
+        # Define the Model
+        def model(x, b0, b1):
+            return b1 * x + b0
+
+        # Try to import iminuit for fitting
+        try:
+            from iminuit import Minuit
+            from iminuit.cost import LeastSquares
+
+        except ImportError:
+            raise ImportError("iminuit is required for fitting.")
+
+        # Define the cost function
+        c = LeastSquares(ref_energies, fit_energies[:,0], fit_energies[:,1], model)
+
+        # Initialize the minimizer with starting values
+        m = Minuit(c, b1=1, b0=0)
+
+        # Set limits
+        m.limits["b1"] = (0.9, 1.1)
+        m.limits["b0"] = (-0.1, 0.1)
+
+        # Perform the fit
+        m.migrad()
+
+        # Check for bad assignments
+        pulls = np.abs(c.pulls(m.values))
+        inds = np.argwhere(pulls > 5).flatten()
+        for idx in inds:
+            print(
+                "Bad assignment of:", labels[idx], "with diff:",
+                c.prediction(m.values)[idx] - fit_energies[idx,0]
+            )
+
+        # Plot the results
+        if plot:
+            # Create the figure
+            fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+
+            # Plot the assignments
+            ax[0].errorbar(
+                ref_energies, fit_energies[:,0], yerr=fit_energies[:,1],
+                fmt="s", markersize=1.5, label="Assign. Phex"
+            )
+
+            # Plot the fit results
+            ax[0].plot(ref_energies, c.prediction(m.values), label="Lin. Regr.")
+
+            # Plot the legend with the chi2/ndof
+            chi2ndof = m.fmin.reduced_chi2
+            ax[0].legend(
+                title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}", loc="best"
+            )
+
+            # Set title and labels
+            ax[0].set_title(r"Assigned Photon-Excitation Energies $E_\text{data}$")
+            ax[0].set_ylabel(r"$E_\text{data}$ [eV]")
+            ax[1].set_xlabel(r"$E_\text{literature}$ [eV]")
+
+            # Plot the residuals
+            ax[1].axhline(0, color="black", linestyle="--", alpha=0.9)
+            if plot_pulls:
+                # Plot the pulls
+                ax[1].step(ref_energies, c.pulls(m.values), where="mid")
+
+                # Set title and label
+                ax[1].set_title("Studentized Residuals of the Linear Regression")
+                ax[1].set_ylabel("Pulls")
+
+            else:
+                # Plot the differences of the fit to the data
+                ax[1].step(ref_energies, c.prediction(m.values) - fit_energies[:,0], where="mid")
+
+                # Set title and label
+                ax[1].set_title("Difference to the Linear Regression")
+                ax[1].set_ylabel(r"$(\text{Lin. Regr.} - E_\text{data})$ [eV]")
+
+            return fig, ax
+
+        return None, None
+
     def assign_phem(self,
         reference: pd.DataFrame,
         phem_label: Dict[str, Union[Sequence[str], int]],
@@ -1511,6 +1643,316 @@ class EnergyScan(Scan):
 
         # Run the application
         run(mw)
+
+    def save_phem(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self._phem_assignments, f)
+
+    def load_phem(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self._phem_assignments = pickle.load(f)
+
+    def eval_phem(self,
+        reference: pd.DataFrame,
+        calib_guess: Tuple[float, float],
+        plot: bool = True,
+        plot_pulls: bool = True,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        # Create a list of fit values and reference values
+        fit_wl = []
+        ref_wl = []
+        labels = []
+
+        # Find matching transitions
+        for i, row in self._phem_assignments.iterrows():
+            ref = reference.copy()
+
+            # Look for the transition in the reference data
+            label = ""
+            for key, value in row.items():
+                # Skip the fit values
+                if key in ["val", "err"]:
+                    continue
+
+                # Skip not existing keys
+                if key not in ref.columns:
+                    continue
+
+                ref.query(f"{key} == @value", inplace=True)
+
+                # Check if matching entries remain
+                if ref.empty:
+                    continue
+
+                label += f"{key} = {value}, "
+
+            # Remove the last comma and space
+            label = label[:-2]
+
+            # Append the found match
+            fit_wl.append([row["val"][1], row["err"][1]])
+            ref_wl.append(ref["E"].iloc[0])
+            labels.append(label)
+
+        # Convert to numpy arrays
+        fit_wl = np.array(fit_wl)
+        ref_wl = np.array(ref_wl)
+        labels = np.array(labels)
+
+        # Sort by calibration energies
+        idx = np.argsort(ref_wl)
+        ref_wl = ref_wl[idx]
+        fit_wl = fit_wl[idx]
+        labels = labels[idx]
+
+        # Define the Model
+        def model(x, b0, b1):
+            return b1 * x + b0
+
+        # Try to import iminuit for fitting
+        try:
+            from iminuit import Minuit
+            from iminuit.cost import LeastSquares
+
+        except ImportError:
+            raise ImportError("iminuit is required for fitting.")
+
+        # Define the cost function
+        c = LeastSquares(ref_wl, fit_wl[:,0], fit_wl[:,1], model)
+
+        # Parse start values
+        b1start = 1 / calib_guess[1]
+        b0start = -calib_guess[0] / calib_guess[1]
+
+        # Initialize the minimizer with starting values
+        m = Minuit(c, b1=b1start, b0=b0start)
+
+        # Perform the fit
+        m.migrad()
+
+        # Get the calibration results
+        b0, b1 = m.values["b0"], m.values["b1"]
+        b0err, b1err = m.errors["b0"], m.errors["b1"]
+
+        # Convert to calibration parameters
+        a1 = 1 / b1
+        a1err = b1err / b1**2
+        a0 = -b0 / b1
+        a0err = np.sqrt(b0err**2 / b1**2 + b0**2 * b1err**2 / b1**4)
+
+        # Set the calibration
+        self.calib = ((a0, a0err), (a1, a1err))
+
+        # Check for bad assignments
+        pulls = np.abs(c.pulls(m.values))
+        inds = np.argwhere(pulls > 5).flatten()
+        for idx in inds:
+            print(
+                "Bad assignment of:", labels[idx], "with diff:",
+                c.prediction(m.values)[idx] - fit_wl[idx,0]
+            )
+
+        # Plot the results
+        if plot:
+            # Create the figure
+            fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+
+            # Plot the assignments
+            ax[0].errorbar(
+                ref_wl, fit_wl[:,0], yerr=fit_wl[:,1],
+                fmt="s", markersize=1.5, label="Assign. Phem"
+            )
+
+            # Plot the fit results
+            ax[0].plot(ref_wl, c.prediction(m.values), label="Lin. Regr.")
+
+            # Plot the legend with the chi2/ndof
+            chi2ndof = m.fmin.reduced_chi2
+            ax[0].legend(
+                title=r"$\chi^2\;/\;$ndof = " + f"{chi2ndof:.2f}", loc="best"
+            )
+
+            # Set title and labels
+            ax[0].set_title(r"Assigned Detector Positions $x_\text{data}$")
+            ax[0].set_ylabel(r"$x_\text{data}$ [arb. u.]")
+            ax[1].set_xlabel(r"$\lambda_\text{literature}$ [nm]")
+
+            # Plot the residuals
+            ax[1].axhline(0, color="black", linestyle="--", alpha=0.9)
+            if plot_pulls:
+                # Plot the pulls
+                ax[1].step(ref_wl, c.pulls(m.values), where="mid")
+
+                # Set title and label
+                ax[1].set_title("Studentized Residuals of the Linear Regression")
+                ax[1].set_ylabel("Pulls")
+            else:
+                # Plot the differences of the fit to the data
+                ax[1].step(ref_wl, c.prediction(m.values) - fit_wl[:,0], where="mid")
+
+                # Set title and label
+                ax[1].set_title("Difference to the Linear Regression")
+                ax[1].set_ylabel(r"$(\text{Lin. Regr.} - x_\text{data})$ [arb. u.]")
+
+            return fig, ax
+
+        return None, None
+
+    def assigned_spectrum(self,
+        phex: Dict[str, Union[str, int]],
+        edges: np.ndarray,
+        n_std: float = 1.0,
+        normalize: bool = False,
+        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
+        qeff: bool = True,
+        bkg: bool = True,
+        calib: bool = True,
+        err_prop: Literal["montecarlo", "none"] = "montecarlo",
+        mc_samples: int = 10000,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get the spectrum at a specific step.
+
+        Parameters
+        ----------
+        phex: Dict[str, Union[str, int]]
+            Dictionary specifying a photon excitation. The photn
+            excitation needs to be in the assignments made with
+            `EnergyScan.assign_phex`.
+        edges: np.ndarray
+            Bin edges for the histogram. For a calibrated spectrum,
+            these should be in wavelength units. For an uncalibrated
+            spectrum, these should be between 0 and 1.
+        n_std: float, optional
+            Number of standard deviations of the assignment fit to use
+            for selecting spectra.
+        normalize: bool, optional
+            Whether to normalize the spectra to their excitation.
+            This will increase the uncertainty of the spectrum, because
+            of the excitation fit uncertainty.
+        roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
+            Region of interest for the detector in the form
+            `((xmin, xmax), (ymin, ymax))`. If not provided, the
+            full detector is used.
+        qeff: bool, optional
+            Whether to apply the spatial detector efficiencies if
+            available.
+        bkg: bool, optional
+            Whether to subtract the background spectrum if available.
+        calib: bool, optional
+            Whether to apply the wavelength calibration if available.
+        err_prop: Literal["montecarlo", "none"], optional
+            Error propagation method for handling the uncertainties of
+            the efficiencies and the wavelength calibration. If
+            `qeff = None` and `calib = None` and `bkg = None`, this
+            setting has no effect. Can be 'montecarlo', or 'none'.
+        mc_samples: int, optional
+            Number of Monte Carlo samples to use for error propagation.
+            Has no effect if `err_prop = 'none'`.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            The spectrum and its uncertainties.
+
+        """
+        # Find the phex assignment
+        df = self._phex_assignments.copy()
+        for key, value in phex.items():
+            df.query(f"{key} == @value", inplace=True)
+
+            # Check if there are matching assignments
+            if df.empty:
+                raise ValueError("Phex assignment not found.")
+
+        # At this point there should be only one assignment
+        assert len(df) == 1, "Multiple or no assignments found."
+
+        # Get the fit results
+        fit_val = df["val"].iloc[0]
+        fit_err = df["err"].iloc[0]
+
+        # Select energy steps within n_std standard deviations of the mean
+        step_idx = np.argwhere(
+            np.abs(self.steps - fit_val[1]) < fit_val[2] * n_std
+        ).flatten()
+
+        # Check if steps were found
+        if len(step_idx) == 0:
+            raise ValueError("No steps found.")
+
+        # Define energy range
+        e_range = (
+            fit_val[1] - fit_val[2] * n_std, fit_val[1] + fit_val[2] * n_std
+        )
+
+        # Check if multiple phex assignments overlap
+        overlap = self.phex_assignments.query(
+            "E > @e_range[0] and E < @e_range[1]"
+        )
+
+        for i, row in overlap.iterrows():
+            if i == df.index[0]:
+                continue
+
+            overlap_val = row["val"]
+            overlap_idx = np.argwhere(
+                np.abs(self.steps - overlap_val[1]) < overlap_val[2]
+            ).flatten()
+
+            # Remove the overlapping steps
+            overlap_idx = np.setdiff1d(step_idx, overlap_idx)
+
+            # Check if steps remain
+            if len(overlap_idx) == 0:
+                warnings.warn("No steps found without overlap.")
+
+            else:
+                step_idx = overlap_idx
+
+        # Initialize arrays for the summed spectrum
+        spectrum = np.zeros(len(edges) - 1)
+        errors = np.zeros(len(edges) - 1)
+
+        # Combine the spectra
+        for idx in step_idx:
+            # Calculate the spectrum
+            spec, err = self.spectrum_at(
+                idx, edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib,
+                err_prop=err_prop, mc_samples=mc_samples
+            )
+
+            # Normalize with the excitation fit results
+            if normalize:
+                # Define function for evaluating the excitation
+                def calc_exc(par):
+                    y = norm.pdf(self.steps[idx], par[0], par[1])
+                    y_max = norm.pdf(par[0], par[0], par[1])
+                    return y / y_max
+
+                # Evaluate the excitation at the step value
+                exc, exc_err = propagate(calc_exc, fit_val[1:], fit_err[1:]**2)
+                exc_err = np.sqrt(exc_err)
+
+                # Normalize the spectrum
+                spec /= exc
+                err = np.sqrt(
+                    err**2 / exc**2 + spec**2 * exc_err**2 / exc**4
+                )
+
+            # Add the spectrum to the sum
+            spectrum += spec
+            errors += err**2
+
+        # Get Gaussian error (currently correlations are not considered)
+        errors = np.sqrt(errors)
+
+        # Normalize to the number of summed spectra
+        if normalize:
+            spec /= len(step_idx)
+            err /= len(step_idx)
+
+        # Return the summed spectrum
+        return spectrum, errors
 
     def phexphem(self,
         xedges: np.ndarray = None,
