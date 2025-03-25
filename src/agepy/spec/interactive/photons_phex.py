@@ -222,10 +222,37 @@ class AssignPhex(MainWindow):
         y = self.y[in_range]
         yerr = self.yerr[in_range]
 
+        # Define starting values for the fit
+        val_start1 = None
+        val_start2 = None
+
         # Get the assignments
         dialog = AssignmentDialog(self, self.label, title="Assign Peak I")
         if dialog.exec():
             exc1 = dialog.get_input()
+
+            # Find the index where to save the assignment
+            df = self.scan._phex_assignments.copy()
+            for l, val in exc1.items():
+                if df.empty:
+                    break
+
+                df.query(f"{l} == @val", inplace=True)
+
+            if df.empty:
+                idx1 = self.scan._phex_assignments.index.max()
+                if np.isnan(idx1):
+                    idx1 = 0
+
+                else:
+                    idx1 += 1
+
+            else:
+                idx1 = df.index[0]
+
+                # Get the starting values
+                val_start1 = df["val"].iloc[0]
+                val_start1 = dict(zip(["s1", "loc1", "scale1"], val_start1))
 
         else:
             return
@@ -233,6 +260,27 @@ class AssignPhex(MainWindow):
         dialog = AssignmentDialog(self, self.label, title="Assign Peak II")
         if dialog.exec():
             exc2 = dialog.get_input()
+
+            # Find the index where to save the assignment
+            df = self.scan._phex_assignments.copy()
+            for l, val in exc2.items():
+                if df.empty:
+                    break
+
+                df = df.query(f"{l} == @val")
+
+            if df.empty:
+                idx2 = idx1 + 1
+
+            else:
+                idx2 = df.index[0]
+
+                # Get the starting values
+                val_start2 = df["val"].iloc[0]
+                val_start2[1] -= val_start1["loc1"]
+                val_start2 = {
+                    "s2": val_start2[0], "loc2_loc1": val_start2[1],
+                }
 
             # Prepare constraint of the energy difference
             E1 = self.reference.copy()
@@ -254,37 +302,20 @@ class AssignPhex(MainWindow):
 
             debug_fit = InteractiveFit(
                 self, y, yerr, x, xerr, sig=["Gaussian", "Gaussian"],
-                bkg="Constant", constrain_dE=constraint
+                bkg="Constant", constrain_dE=constraint, **val_start1,
+                **val_start2
             )
 
         else:
             exc2 = None
             debug_fit = InteractiveFit(
-                self, y, yerr, x, xerr, sig="Gaussian", bkg="Constant"
+                self, y, yerr, x, xerr, sig="Gaussian", bkg="Constant",
+                **val_start1
             )
 
         # Fit the data
         if debug_fit.exec():
             m = debug_fit.m
-
-            # Find the index where to save the assignment
-            df = self.scan._phex_assignments.copy()
-            for l, val in exc1.items():
-                if df.empty:
-                    break
-
-                df.query(f"{l} == @val", inplace=True)
-
-            if df.empty:
-                idx = self.scan._phex_assignments.index.max()
-                if np.isnan(idx):
-                    idx = 0
-
-                else:
-                    idx += 1
-
-            else:
-                idx = df.index[0]
 
             # Create the new row
             exc1["E"] = float(m.values["loc1"])
@@ -292,42 +323,29 @@ class AssignPhex(MainWindow):
             exc1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
 
             # Save the assignment
-            self.scan._phex_assignments.loc[idx] = exc1
+            self.scan._phex_assignments.loc[idx1] = exc1
 
             # Process the second assignment
             if exc2 is not None:
-                # Find the index where to save the assignment
-                df = self.scan._phex_assignments.copy()
-                for l, val in exc2.items():
-                    if df.empty:
-                        break
-
-                    df = df.query(f"{l} == @val")
-
-                if df.empty:
-                    idx = self.scan._phex_assignments.index.max() + 1
-
-                else:
-                    idx = df.index[0]
-
                 # Create the new row
-                if "loc2" in m.parameters:
-                    exc2["E"] = float(m.values["loc2"])
-                    exc2["val"] = np.array(m.values["s2", "loc2", "scale2"])
-                    exc2["err"] = np.array(m.errors["s2", "loc2", "scale2"])
+                cov = np.array(m.covariance)
+                inds = [m.parameters.index(p) for p in ["loc1", "loc2_loc1"]]
+                cov = cov[np.ix_(inds, inds)]
+                loc2, loc2err = propagate(
+                    lambda par: par[0] + par[1],
+                    m.values["loc1", "loc2_loc1"], cov
+                )
 
-                else:
-                    cov = np.array(m.covariance)
-                    inds = [m.parameters.index(p) for p in ["loc1", "loc2_loc1"]]
-                    cov = cov[np.ix_(inds, inds)]
-                    loc2, loc2err = propagate(lambda par: par[0] + par[1], m.values["loc1", "loc2_loc1"], cov)
-
-                    exc2["E"] = loc2
-                    exc2["val"] = np.array([m.values["s2"], loc2, m.values["scale1"]])
-                    exc2["err"] = np.array([m.errors["s2"], loc2err, m.errors["scale1"]])
+                exc2["E"] = loc2
+                exc2["val"] = np.array(
+                    [m.values["s2"], loc2, m.values["scale1"]]
+                )
+                exc2["err"] = np.array(
+                    [m.errors["s2"], loc2err, m.errors["scale1"]]
+                )
 
                 # Save the assignment
-                self.scan._phex_assignments.loc[idx] = exc2
+                self.scan._phex_assignments.loc[idx2] = exc2
 
             # Close the fit plot
             plt.close()
@@ -347,6 +365,7 @@ class InteractiveFit(QtWidgets.QDialog):
         sig: Union[str, Tuple[str, str]] = "Gaussian",
         bkg: str = "Constant",
         constrain_dE: Tuple[float, float] = None,
+        **start_values
     ) -> None:
         # Initialize fit data
         self.y = y
@@ -360,6 +379,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Define starting values and limits
         self.s_start = np.max(y) * (x[1] - x[0])
         self.s_limit = np.max(y) * (x[1] - x[0]) * 5
+        self.start_values = start_values
 
         # Set the constraint
         self.constrain_dE = constrain_dE
@@ -500,7 +520,12 @@ class InteractiveFit(QtWidgets.QDialog):
                     "loc2_loc1", *self.constrain_dE
                 )
 
-        # Keep previous parameters and limits if possible
+        # Overwrite given starting values
+        for par, val in self.start_values.items():
+            if par in self.params:
+                self.params[par] = val
+
+        # Keep previous parameters values
         for par in params_prev:
             if par in self.params:
                 self.params[par] = self.m.values[par]
