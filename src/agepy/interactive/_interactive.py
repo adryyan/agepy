@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 __all__ = []
 
 
-def run(mw: QtWidgets.QWidget) -> int:
+def get_qapp() -> QtWidgets.QApplication:
     # Get the current application instance
     app = QtWidgets.QApplication.instance()
 
@@ -49,11 +49,7 @@ def run(mw: QtWidgets.QWidget) -> int:
     if app is None:
         app = QtWidgets.QApplication([])
 
-    # Show the main window
-    mw.show()
-
-    # Run the application
-    return app.exec()
+    return app
 
 
 class MainWindow(QtWidgets.QMainWindow):

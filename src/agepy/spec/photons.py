@@ -961,7 +961,7 @@ class BaseScan:
     def remove_steps(self,
         measurement_number: str,
         steps: Union[Sequence[int], Sequence[float]],
-    ) -> None:
+    ) -> np.ndarray:
         """Remove the specified steps of a measurement from the scan.
 
         Parameters
@@ -995,6 +995,8 @@ class BaseScan:
         self._steps = np.delete(self.steps, mask)
         self._spectra = np.delete(self.spectra, mask)
         self._id = np.delete(self.id, mask)
+
+        return mask
 
     def save(self, filepath: str) -> None:
         """
@@ -1469,19 +1471,45 @@ class EnergyScan(Scan):
         else:
             raise ValueError("Uncertainties must be a numpy array or a float.")
 
+    def remove_steps(self,
+        measurement_number: str,
+        steps: Union[Sequence[int], Sequence[float]],
+    ) -> np.ndarray:
+        """Remove the specified steps of a measurement from the scan.
+
+        Parameters
+        ----------
+        measurement_number: str
+            Measurement number (metro) to remove the steps from.
+        steps: Union[Sequence[int], Sequence[float]]
+            List of step values to remove.
+
+        """
+        # Call the base class method
+        mask = super().remove_steps(measurement_number, steps)
+
+        # Remove the uncertainties
+        self._energy_uncertainty = np.delete(self._energy_uncertainty, mask)
+
+        return mask
+
     def assign_phex(self,
         reference: pd.DataFrame,
         label: Dict[str, Union[Sequence[str], int]],
         energy_range: float,
-    ) -> None:
-        from agepy.interactive import run
+    ) -> int:
+        from agepy.interactive import get_qapp
         from agepy.spec.interactive.photons_phex import AssignPhex
+
+        # Get the Qt application
+        app = get_qapp()
 
         # Intialize the viewer
         mw = AssignPhex(self, reference, label, energy_range)
+        mw.show()
 
         # Run the application
-        run(mw)
+        app.exec()
 
     def save_phex(self, path: str) -> None:
         with open(path, "wb") as f:
@@ -1512,13 +1540,17 @@ class EnergyScan(Scan):
                 if key in ["E", "val", "err"]:
                     continue
 
-                ref.query(f"{key} == @value", inplace=True)
-
                 # Check if matching entries remain
                 if ref.empty:
                     continue
 
+                ref.query(f"{key} == @value", inplace=True)
+
                 label += f"{key} = {value}, "
+
+            # Check if matching entries remain
+            if ref.empty:
+                continue
 
             # Remove the last comma and space
             label = label[:-2]
@@ -1627,19 +1659,23 @@ class EnergyScan(Scan):
         calib_guess: Tuple[float, float],
         bins: int = 512,
     ) -> None:
-        from agepy.interactive import run
+        from agepy.interactive import get_qapp
         from agepy.spec.interactive.photons_phem import AssignPhem
 
         # Create the bin edges
         edges = np.histogram([], bins=bins, range=(0, 1))[1]
 
+        # Get the Qt application
+        app = get_qapp()
+
         # Intialize the viewer
         mw = AssignPhem(
             self, edges, reference, phem_label, phex_label, calib_guess
         )
+        mw.show()
 
         # Run the application
-        run(mw)
+        app.exec()
 
     def save_phem(self, path: str) -> None:
         with open(path, "wb") as f:
@@ -2128,21 +2164,25 @@ class QEffScan(Scan):
         err[x > px[-1]] = 0
         return eff, err
 
-    def interactive(self, bins: int = 512, mc_samples=10000) -> None:
+    def interactive(self, bins: int = 512, mc_samples=10000) -> int:
         """Plot the spectra in an interactive window.
 
         """
-        from agepy.interactive import run
+        from agepy.interactive import get_qapp
         from agepy.spec.interactive.photons_qeff import EvalQEff
 
         # Create the edges
         edges = np.histogram([], bins=bins, range=(0, 1))[1]
 
+        # Get the Qt application
+        app = get_qapp()
+
         # Intialize the viewer
         mw = EvalQEff(self, edges, mc_samples)
+        mw.show()
 
         # Run the application
-        run(mw)
+        return app.exec()
 
     def plot(self,
         ax: Axes = None,
@@ -2189,3 +2229,30 @@ class QEffScan(Scan):
         ax.set_title("Measured Lateral Quantum Efficiency")
 
         return fig, ax
+
+    def save(self, filepath: str) -> None:
+        """
+        Save the evaluated quantum efficiencies.
+
+        Parameters
+        ----------
+        filepath: str
+            Path to the file where the qeff will be saved.
+
+        """
+        with open(filepath, "wb") as f:
+            pickle.dump(self.qeff, f)
+
+    @staticmethod
+    def load(filepath: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Load the evaluated quantum efficiencies.
+
+        Parameters
+        ----------
+        filepath: str
+            Path to the file where the qeff is saved.
+
+        """
+        with open(filepath, "rb") as f:
+            return pickle.load(f)

@@ -184,7 +184,7 @@ class DldAnodeUW(DldAnode):
 
     def process(self, rows):
         u = rows[:, 0] - rows[:, 1]
-        w = rows[:, 2] - rows[:, 3]
+        w = rows[:, 4] - rows[:, 5]
 
         pos = np.empty((u.shape[0], 2), dtype=float)
         pos[:, 0] = u
@@ -196,8 +196,8 @@ class DldAnodeUW(DldAnode):
 class DldAnodeVW(DldAnode):
 
     def process(self, rows):
-        v = rows[:, 0] - rows[:, 1]
-        w = rows[:, 2] - rows[:, 3]
+        v = rows[:, 2] - rows[:, 3]
+        w = rows[:, 4] - rows[:, 5]
 
         pos = np.empty((v.shape[0], 2), dtype=float)
         pos[:, 0] = - v - w

@@ -39,6 +39,7 @@ except ImportError:
 
 import numpy as np
 import numba as nb
+import matplotlib.pyplot as plt
 
 # Import internal modules
 from agepy.spec.interactive.photons_scan import SpectrumViewer
@@ -110,6 +111,9 @@ class EvalQEff(SpectrumViewer):
             self.scan._pyerr[self.step] = m.errors["s"]
             self.scan._px[self.step] = m.values["loc"]
             self.scan._pxerr[self.step] = m.errors["loc"]
+
+        # Close the plot
+        plt.close()
 
         # Clear the selector
         self.selector.clear()

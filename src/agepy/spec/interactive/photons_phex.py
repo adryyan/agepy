@@ -276,7 +276,7 @@ class AssignPhex(MainWindow):
                 df.query(f"{l} == @val", inplace=True)
 
             if df.empty:
-                idx = self.scan.phex_assignments.index.max()
+                idx = self.scan._phex_assignments.index.max()
                 if np.isnan(idx):
                     idx = 0
 
@@ -292,12 +292,12 @@ class AssignPhex(MainWindow):
             exc1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
 
             # Save the assignment
-            self.scan.phex_assignments.loc[idx] = exc1
+            self.scan._phex_assignments.loc[idx] = exc1
 
             # Process the second assignment
             if exc2 is not None:
                 # Find the index where to save the assignment
-                df = self.scan.phex_assignments.copy()
+                df = self.scan._phex_assignments.copy()
                 for l, val in exc2.items():
                     if df.empty:
                         break
@@ -305,7 +305,7 @@ class AssignPhex(MainWindow):
                     df = df.query(f"{l} == @val")
 
                 if df.empty:
-                    idx = self.scan.phex_assignments.index.max() + 1
+                    idx = self.scan._phex_assignments.index.max() + 1
 
                 else:
                     idx = df.index[0]
@@ -327,7 +327,10 @@ class AssignPhex(MainWindow):
                     exc2["err"] = np.array([m.errors["s2"], loc2err, m.errors["scale1"]])
 
                 # Save the assignment
-                self.scan.phex_assignments.loc[idx] = exc2
+                self.scan._phex_assignments.loc[idx] = exc2
+
+            # Close the fit plot
+            plt.close()
 
             # Update the plot
             self.plot()
@@ -411,6 +414,7 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Create ComboBox for the first signal component
         self.sig_comp1 = QtWidgets.QComboBox()
+        self.sig_comp1.setSizePolicy(size_policy)
         self.sig_comp1.addItems(self.sig_models.keys())
         self.sig_comp1.setCurrentIndex(list(self.sig_models.keys()).index(sig[0]))
         self.sig_comp1.currentIndexChanged.connect(self.prepare_fit)
@@ -418,6 +422,7 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Create ComboBox for the second signal component
         self.sig_comp2 = QtWidgets.QComboBox()
+        self.sig_comp2.setSizePolicy(size_policy)
         self.sig_comp2.addItems(list(self.sig_models.keys()) + ["None"])
         self.sig_comp2.setCurrentIndex((list(self.sig_models.keys()) + ["None"]).index(sig[1]))
         self.sig_comp2.currentIndexChanged.connect(self.prepare_fit)
@@ -430,6 +435,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.background_group.setSizePolicy(size_policy)
         self.background_layout = QtWidgets.QHBoxLayout(self.background_group)
         self.bkg_comp = QtWidgets.QComboBox()
+        self.bkg_comp.setSizePolicy(size_policy)
         self.bkg_comp.addItems(self.bkg_models.keys())
         self.bkg_comp.setCurrentIndex(list(self.bkg_models.keys()).index(bkg))
         self.bkg_comp.currentIndexChanged.connect(self.prepare_fit)
@@ -457,6 +463,12 @@ class InteractiveFit(QtWidgets.QDialog):
             self.button_group, 1, 3, 1, 1,
             alignment=QtCore.Qt.AlignmentFlag.AlignLeft
         )
+
+        # Set the column stretch factors
+        self.layout.setColumnStretch(0, 2)  # Signal group column
+        self.layout.setColumnStretch(1, 2)  # Signal group column
+        self.layout.setColumnStretch(2, 1)  # Background group column
+        self.layout.setColumnStretch(3, 0)  # Button group column
 
         # Create the initial fit widget
         self.prepare_fit()
@@ -495,13 +507,15 @@ class InteractiveFit(QtWidgets.QDialog):
 
 
         # Define the cost function
+        x = self.x
+        xerr = self.xerr
+        y = self.y
+        yerr = self.yerr
 
         @nb.njit
         def _cost(par):
-            result = 0.0
-            for xi, yi, dxi, dyi in zip(self.x, self.y, self.xerr, self.yerr):
-                y_var = dyi**2 + (derivative(xi, *par) * dxi) ** 2
-                result += (yi - model(xi, *par)) ** 2 / y_var
+            y_var = yerr**2 + (derivative(x, *par) * xerr) ** 2
+            result = np.sum((y - model(x, *par)) ** 2 / y_var)
             return result
 
         class LeastSquaresXY(cost.LeastSquares):
@@ -541,7 +555,7 @@ class InteractiveFit(QtWidgets.QDialog):
             "Gaussian": self.gaussian,
         }
         self.bkg_models = {
-            "Constant": self.constant,
+            "Constant": None,
         }
 
     def gaussian(self) -> Tuple[callable, callable, dict, dict]:
@@ -555,9 +569,11 @@ class InteractiveFit(QtWidgets.QDialog):
             "scale1": (0.0001 * dx, 0.5 * dx), "b": (0, None)
         }
 
+        @nb.njit
         def model(x, s1, loc1, scale1, b):
             return s1 * norm.pdf(x, loc1, scale1) + b
 
+        @nb.njit
         def derivative(x, s1, loc1, scale1, b):
             return -s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
 
@@ -577,10 +593,12 @@ class InteractiveFit(QtWidgets.QDialog):
             "scale1": (0.0001 * dx, 0.5 * dx), "b": (0, None)
         }
 
+        @nb.njit
         def model(x, s1, s2, loc1, loc2_loc1, scale1, b):
             return (s1 * norm.pdf(x, loc1, scale1)
                     + s2 * norm.pdf(x, loc1 + loc2_loc1, scale1) + b)
 
+        @nb.njit
         def derivative(x, s1, s2, loc1, loc2_loc1, scale1, b):
             return (-s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
                     - s2 * norm.pdf(x, loc1 + loc2_loc1, scale1) * (x - loc1 - loc2_loc1) / scale1**2)
