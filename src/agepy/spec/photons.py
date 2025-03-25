@@ -600,6 +600,9 @@ class Spectrum:
                     # Histogram the background data without the efficiencies
                     bkg = np.histogram(bkg_data, bins=edges)[0]
 
+                # Convert to floats
+                bkg = np.array(bkg, dtype=np.float64)
+
                 # Normalize the background to the measurement duration
                 bkg = bkg / bkg_t * self._t
 
