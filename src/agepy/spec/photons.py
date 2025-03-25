@@ -146,7 +146,7 @@ def _mc_calibrated_spectrum_with_bkg(output, data, edges, bkg, calib, rng, n):
     # Define the edges for the background distribution
     xedges = np.linspace(0, 1, 513)
     # Calculate the background distribution
-    bkg_pdf = numba_histogram(bkg[0], xedges, np.ones_like(bkg[0]))
+    bkg_pdf = numba_histogram(bkg[0], xedges)
     # Assign the background probabilities to the data points
     bkg_inds = np.digitize(data[0], xedges[1:-1])
     bkg_prob = bkg_pdf[bkg_inds]
@@ -1927,7 +1927,7 @@ class EnergyScan(Scan):
         )
 
         # Check if multiple phex assignments overlap
-        overlap = self.phex_assignments.query(
+        overlap = self._phex_assignments.query(
             "E > @e_range[0] and E < @e_range[1]"
         )
 

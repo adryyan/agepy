@@ -75,6 +75,21 @@ class AssignPhem(SpectrumViewer):
         self.phex_label = phex_label
         self.calib = calib_guess
 
+        # Define x limits
+        roi = scan.roi
+        self.xlim = (roi[0][0], roi[0][1])
+
+        # Prepare assignments
+        if scan._phex_assignments is None:
+            raise ValueError("Phex assignments are required.")
+
+        self.phex = scan._phex_assignments.copy()
+
+        if scan._phem_assignments is None:
+            scan._phem_assignments = pd.DataFrame(
+                columns=[*self.phem_label, *self.phex_label, "val", "err"]
+            )
+
         # Set up the main window
         super().__init__(scan, edges)
 
@@ -87,21 +102,6 @@ class AssignPhem(SpectrumViewer):
         self.calc_options[2] = False
         self.actions[2].setChecked(False)
         self.actions[2].setEnabled(False)
-
-        # Prepare assignments
-        if self.scan._phex_assignments is None:
-            raise ValueError("Phex assignments are required.")
-
-        self.phex = self.scan._phex_assignments.copy()
-
-        if self.scan._phem_assignments is None:
-            self.scan._phem_assignments = pd.DataFrame(
-                columns=[*self.phem_label, *self.phex_label, "val", "err"]
-            )
-
-        # Prepare
-        roi = self.scan.roi
-        self.xlim = (roi[0][0], roi[0][1])
 
         # Plot the first spectrum
         self.plot()
@@ -174,6 +174,9 @@ class AssignPhem(SpectrumViewer):
             for l, val in phex_dict.items():
                 if phem.empty:
                     break
+
+                if l not in phem:
+                    continue
 
                 phem.query(f"{l} == @val", inplace=True)
 
@@ -278,13 +281,15 @@ class AssignPhem(SpectrumViewer):
             phem2 = dialog.get_input()
 
             debug_fit = InteractiveFit(
-                n, xe, sig=["Gaussian", "Gaussian"], bkg="Constant"
+                self, n, xe, sig=["Gaussian", "Gaussian"], bkg="Constant"
             )
 
         else:
             phem2 = None
 
-            debug_fit = InteractiveFit(n, xe, sig="Gaussian", bkg="Constant")
+            debug_fit = InteractiveFit(
+                self, n, xe, sig="Gaussian", bkg="Constant"
+            )
 
         # Fit the data
         if debug_fit.exec():
@@ -577,11 +582,6 @@ class InteractiveFit(QtWidgets.QDialog):
         
         # Set the limits
         for par, lim in limits.items():
-            self.m.limits[par] = lim
-
-        # Update the Minuit object
-        self.m = Minuit(self.cost, *list(self.params.values()), name=list(self.params.keys()))
-        for par, lim in self.limits.items():
             self.m.limits[par] = lim
 
         # Update the visualization
