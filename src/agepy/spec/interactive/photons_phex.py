@@ -347,8 +347,8 @@ class AssignPhex(MainWindow):
                 # Save the assignment
                 self.scan._phex_assignments.loc[idx2] = exc2
 
-            # Close the fit plot
-            plt.close()
+            # Close pyplot figures
+            plt.close("all")
 
             # Update the plot
             self.plot()

@@ -6,18 +6,8 @@ from contextlib import contextmanager
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 
-    qt_binding = "PySide6"
-
 except ImportError:
-    warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
-
-    try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
-
-        qt_binding = "PyQt6"
-
-    except ImportError:
-        raise ImportError("No compatible Qt bindings found.")
+    raise ImportError("PySide6 required for interactive fitting.")
 
 # Import the modules for the fitting
 try:
@@ -36,7 +26,7 @@ try:
     )
 
 except ImportError:
-    raise ImportError("iminuit and jax required for fitting.")
+    raise ImportError("iminuit and numba_stats required for fitting.")
 
 import numpy as np
 import numba as nb
@@ -66,19 +56,17 @@ class AssignPhem(SpectrumViewer):
         scan: EnergyScan,
         edges: np.ndarray,
         reference: pd.DataFrame,
-        phem_label: Dict[str, Union[Sequence[str], int]],
-        phex_label: Dict[str, Union[Sequence[str], int]],
+        label: Dict[str, Union[Sequence[str], int]],
         calib_guess: Tuple[float, float],
     ) -> None:
         # Set the attributes
         self.reference = reference
-        self.phem_label = phem_label
-        self.phex_label = phex_label
+        self.label = label
         self.calib = calib_guess
+        self.step = 0
 
         # Define x limits
-        roi = scan.roi
-        self.xlim = (roi[0][0], roi[0][1])
+        self.xlim = (scan.roi[0][0], scan.roi[0][1])
 
         # Prepare assignments
         if scan._phex_assignments is None:
@@ -86,8 +74,9 @@ class AssignPhem(SpectrumViewer):
 
         self.phex = scan._phex_assignments.copy()
 
+        # Create the phem assignments dataframe
         if scan._phem_assignments is None:
-            col = [*self.phem_label, *self.phex_label, "model", "fit"]
+            col = [*self.label, *self.phex_to_dict(), "model", "fit"]
             scan._phem_assignments = pd.DataFrame(columns=col)
 
         # Set up the main window
@@ -95,7 +84,7 @@ class AssignPhem(SpectrumViewer):
 
         # Add the fit action
         self.add_rect_selector(
-            self.ax, self.assign, interactive=False, hint="Assign Peak"
+            self.ax, self.assign, interactive=False, hint="Assign Peaks"
         )
 
         with _block_signals(*self.actions):
@@ -112,19 +101,23 @@ class AssignPhem(SpectrumViewer):
             self.calc_options[3] = True
             self.actions[3].setChecked(True)
 
-        # Plot the first spectrum
+        # Plot the spectrum with the adjusted settings
         self.plot()
 
-    def _parse_phex(self):
+    def phex_to_dict(self):
+        # Get the current phex assignment
         phex = self.phex.iloc[self.step]
+
+        # Create a dictionary
         phex_dict = {}
-        phex_str = ""
+
         for key, val in phex.items():
             if key in ["E", "val", "err"]:
                 continue
+
             phex_dict[key] = val
-            phex_str += f"{key}={val}, "
-        return phex, phex_dict, phex_str[:-2]
+
+        return phex_dict
 
     def find_phem(self, values: Dict[str, Union[str, int]]) -> pd.DataFrame:
         phem = self.scan._phem_assignments.copy()
@@ -140,6 +133,20 @@ class AssignPhem(SpectrumViewer):
 
         return phem
 
+    def find_reference(self, values: Dict[str, Union[str, int]]) -> pd.DataFrame:
+        ref = self.reference.copy()
+
+        for key, val in values.items():
+            if ref.empty:
+                break
+
+            if key not in ref:
+                continue
+
+            ref.query(f"{key} == @val", inplace=True)
+
+        return ref
+
     def plot(self):
         # Prepare x -> wavelength conversion and vice versa
         a0, a1 = self.calib
@@ -148,7 +155,7 @@ class AssignPhem(SpectrumViewer):
         wlim = (a1 * self.xlim[0] + a0, a1 * self.xlim[1] + a0)
 
         # Get the current phex assignment
-        phex, phex_dict, phex_str = self._parse_phex()
+        phex_dict = self.phex_to_dict()
 
         # Get the calculation options
         qeff, bkg, calib, uncertainties = self.calc_options
@@ -169,8 +176,8 @@ class AssignPhem(SpectrumViewer):
         progress_dialog.show()
 
         self.y, self.yerr = self.scan.assigned_spectrum(
-            phex_dict, self.edges, qeff=qeff, bkg=bkg, calib=calib,
-            err_prop=error_prop, mc_samples=self.mc_samples
+            phex_dict, self.edges, n_std=1, normalize=True, qeff=qeff, bkg=bkg,
+            calib=calib, err_prop=error_prop, mc_samples=self.mc_samples
         )
 
         # Close the progress dialog
@@ -184,7 +191,8 @@ class AssignPhem(SpectrumViewer):
             self.ax.clear()
 
             # Set the title
-            self.ax.set_title(phex_str)
+            title = f"{phex_dict}"[1:-1].replace("'", "").replace(":", " =")
+            self.ax.set_title(title)
 
             # Plot the spectrum
             self.ax.stairs(self.y, self.edges, color=ageplot.colors[1])
@@ -193,7 +201,7 @@ class AssignPhem(SpectrumViewer):
             if self.yerr is not None:
                 self.ax.stairs(
                     self.y + self.yerr, self.edges, baseline=self.y - self.yerr,
-                    color=ageplot.colors[1], alpha=0.5
+                    color=ageplot.colors[1], fill=True, alpha=0.5
                 )
 
             # Set the limits
@@ -202,17 +210,7 @@ class AssignPhem(SpectrumViewer):
 
  
             # Plot assignments
-            phem = self.scan._phem_assignments.copy()
-
-            # Find the current phex assignment in the phem assignments
-            for l, val in phex_dict.items():
-                if phem.empty:
-                    break
-
-                if l not in phem:
-                    continue
-
-                phem.query(f"{l} == @val", inplace=True)
+            phem = self.find_phem(phex_dict)
 
             # Plot the found assignments
             for i, row in phem.iterrows():
@@ -222,6 +220,7 @@ class AssignPhem(SpectrumViewer):
                 # Calculate the y values and their uncertainties
                 y, yerr = row["fit"](x)
 
+                # Scale to the bin width
                 dx = self.edges[1] - self.edges[0]
                 y *= dx
                 yerr *= dx
@@ -233,18 +232,11 @@ class AssignPhem(SpectrumViewer):
                 )
 
             # Plot reference
-            ref = self.reference.query("E >= @wlim[0]").query("E <= @wlim[1]")
+            ref = self.find_reference(phex_dict)
 
-            # Find the current phex assignment in the reference
-            for pl in self.phex_label:
-                if ref.empty:
-                    break
-
-                if pl not in ref:
-                    continue
-
-                val = phex[pl]
-                ref.query(f"{pl} == @val", inplace=True)
+            # Select lines within the wavelength limits
+            if not ref.empty:
+                ref = ref.query("E >= @wlim[0]").query("E <= @wlim[1]")
 
             # Plot the found reference
             for i, row in ref.iterrows():
@@ -256,14 +248,11 @@ class AssignPhem(SpectrumViewer):
 
                 # Create the text
                 text = ""
-                for label in self.phem_label:
+                for label in self.label:
                     text += f"{row[label]},"
 
-                # Remove the last comma
-                text = text[:-1]
-
                 self.ax.text(
-                    x + 0.0002, np.max(self.y), text, ha="left", va="top",
+                    x + 0.0002, np.max(self.y), text[:-1], ha="left", va="top",
                     rotation=90
                 )
 
@@ -281,23 +270,25 @@ class AssignPhem(SpectrumViewer):
         xr = (eclick.xdata, erelease.xdata)
 
         # Get the current phex assignment
-        phex, phex_dict, phex_str = self._parse_phex()
+        phex_dict = self.phex_to_dict()
 
         # Recalculate the spectrum with uncertainties
         if self.yerr is None:
             self.actions[3].setChecked(True)
-            self.plot()
         
         # Prepare the data for the fit
-        in_range = np.argwhere((self.edges >= xr[0]) & (self.edges <= xr[1])).flatten()
+        in_range = np.argwhere((
+            self.edges >= xr[0]) & (self.edges <= xr[1])
+        ).flatten()
         xe = self.edges[in_range]
         y = self.y[in_range[:-1]]
         yerr = self.yerr[in_range[:-1]]
         n = np.stack((y, yerr**2), axis=-1)
 
-        # Get the assignments
-        dialog = AssignmentDialog(self, self.phem_label, title="Assign Peak 1")
+        # Get the assignment for the first peak
+        dialog = AssignmentDialog(self, self.label, title="Assign Peak 1")
         if dialog.exec():
+            # Get the user input
             phem1 = dialog.get_input()
 
             # Define starting values
@@ -307,11 +298,11 @@ class AssignPhem(SpectrumViewer):
             sig1_model = "Gaussian"
             sig2_model = "None"
 
-            # Find the index where to save the assignment
-            df = self.find_phem({**phem1, **phex_dict})
+            # Add the phex assignment
+            phem1 = {**phem1, **phex_dict}
 
-            for l, val in phex_dict.items():
-                phem1[l] = val
+            # Find the index where to save the assignment
+            df = self.find_phem(phem1)
 
             if df.empty:
                 idx1 = self.scan._phem_assignments.index.max()
@@ -326,37 +317,43 @@ class AssignPhem(SpectrumViewer):
 
                 # Get the model and starting values
                 sig1_model = df.loc[idx1, "model"]
-                start_values = {
-                    f"{k}1": v for k, v in df.loc[idx1, "fit"].start_val(1).items()
-                }
+                start_values = df.loc[idx1, "fit"].start_val(1)
+                start_values = {f"{k}1": v for k, v in start_values.items()}
 
         else:
             return
 
-        dialog = AssignmentDialog(self, self.phem_label, title="Assign Peak 2")
+        # Get the assignment for the second peak
+        dialog = AssignmentDialog(self, self.label, title="Assign Peak 2")
         if dialog.exec():
+            # Get the user input
             phem2 = dialog.get_input()
 
             # Set the default signal model
             sig2_model = "Gaussian"
 
-            # Find the index where to save the assignment
-            df = self.find_phem({**phem2, **phex_dict})
+            # Add the phex assignment
+            phem2 = {**phem2, **phex_dict}
 
-            for l, val in phex_dict.items():
-                phem2[l] = val
+            # Find the index where to save the assignment
+            df = self.find_phem(phem2)
 
             if df.empty:
-                idx2 = idx1 + 1
+                idx2 = self.scan._phem_assignments.index.max()
+
+                if np.isnan(idx2) or idx2 + 1 == idx1:
+                    idx2 = idx1 + 1
+
+                else:
+                    idx2 += 1
 
             else:
                 idx2 = df.index[0]
 
                 # Get the model and starting values
                 sig2_model = df.loc[idx2, "model"]
-                sv2 = {
-                    f"{k}2": v for k, v in df.loc[idx2, "fit"].start_val(1).items()
-                }
+                sv2 = df.loc[idx2, "fit"].start_val(1)
+                sv2 = {f"{k}2": v for k, v in sv2.items()}
                 start_values = {**start_values, **sv2}
 
         else:
@@ -369,6 +366,7 @@ class AssignPhem(SpectrumViewer):
 
         # Fit the data
         if debug_fit.exec():
+            # Get the fit results
             res1, res2 = debug_fit.fit_result()
 
             # Don't save the assignment if the fit failed
@@ -387,6 +385,9 @@ class AssignPhem(SpectrumViewer):
 
                 # Save the assignment
                 self.scan._phem_assignments.loc[idx2] = phem2
+
+        # Close pyplot figures
+        plt.close("all")
 
         # Plot the results
         self.plot()
@@ -487,14 +488,18 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create ComboBox for the first signal component
         self.sig_comp1 = QtWidgets.QComboBox()
         self.sig_comp1.addItems(self.sig_models.keys())
-        self.sig_comp1.setCurrentIndex(list(self.sig_models.keys()).index(sig[0]))
+        self.sig_comp1.setCurrentIndex(
+            list(self.sig_models.keys()).index(sig[0])
+        )
         self.sig_comp1.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp1)
 
         # Create ComboBox for the second signal component
         self.sig_comp2 = QtWidgets.QComboBox()
         self.sig_comp2.addItems(list(self.sig_models.keys()) + ["None"])
-        self.sig_comp2.setCurrentIndex((list(self.sig_models.keys()) + ["None"]).index(sig[1]))
+        self.sig_comp2.setCurrentIndex(
+            (list(self.sig_models.keys()) + ["None"]).index(sig[1])
+        )
         self.sig_comp2.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp2)
 
@@ -585,6 +590,7 @@ class InteractiveFit(QtWidgets.QDialog):
             lim2 = bkg.limits()
 
             self.bkg = bkg
+            self.sig2 = None
 
             # Combine the parameters and limits
             self.params = {**par1, **par2}
@@ -606,6 +612,7 @@ class InteractiveFit(QtWidgets.QDialog):
             lim2 = {f"{k}2": v for k, v in lim2.items()}
 
             self.sig2 = sig2
+            self.bkg = None
 
             # Combine the parameters and limits
             self.params = {**par1, **par2}
@@ -683,7 +690,6 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Get the covariance matrix
         cov = np.array(self.m.covariance)
-        print(cov)
 
         # Get the fit results for sig1
         sig1 = {}
@@ -700,7 +706,6 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Get the covariance matrix for sig1
         self.sig1.cov = cov[:len(par1), :len(par1)]
-        print(self.sig1.cov)
         
         # Set the fit results for sig1
         sig1["fit"] = self.sig1
@@ -725,7 +730,6 @@ class InteractiveFit(QtWidgets.QDialog):
         idx1 = len(par1)
         idx2 = idx1 + len(par2)
         self.sig2.cov = cov[idx1:idx2, idx1:idx2]
-        print(self.sig2.cov)
         
         # Set the fit results for sig2
         sig2["fit"] = self.sig2

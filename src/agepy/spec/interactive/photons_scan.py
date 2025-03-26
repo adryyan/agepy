@@ -138,7 +138,7 @@ class SpectrumViewer(MainWindow):
             if self.yerr is not None:
                 self.ax.stairs(
                     self.y + self.yerr, self.edges, baseline=self.y - self.yerr,
-                    color=ageplot.colors[0], alpha=0.5
+                    color=ageplot.colors[0], alpha=0.5, fill=True
                 )
 
             # Refresh the canvas

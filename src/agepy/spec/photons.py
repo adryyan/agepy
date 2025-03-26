@@ -1133,35 +1133,28 @@ class Scan(BaseScan):
             else:
                 return None
 
-        elif isinstance(qeff, tuple):
-            try:
-                values = np.array(qeff[0])
-                errors = np.array(qeff[1])
-                x = np.array(qeff[2])
-
-                # Check if the arrays have the same length
-                assert len(values) == len(errors)
-                assert len(values) == len(x)
-                # Check if the values and errors are positive
-                assert np.all(values > 0)
-                assert np.all(errors >= 0)
-                # Check if x is between 0 and 1
-                assert np.all(x > 0)
-                assert np.all(x < 1)
-
-            except:
-                raise ValueError(
-                    "Detector efficiencies must be provided as "
-                    "(values, errors, x)."
-                )
-
-            return values, errors, x
-
-        elif isinstance(qeff, QEffScan):
+        if isinstance(qeff, QEffScan):
             return qeff.qeff
-        
-        else:
+
+        try:
+            values = np.array(qeff[0])
+            errors = np.array(qeff[1])
+            x = np.array(qeff[2])
+
+            # Check if the arrays have the same length
+            assert len(values) == len(errors)
+            assert len(values) == len(x)
+            # Check if the values and errors are positive
+            assert np.all(values > 0)
+            assert np.all(errors >= 0)
+            # Check if x is between 0 and 1
+            assert np.all(x > 0)
+            assert np.all(x < 1)
+
+        except:
             raise ValueError("qeff could not be parsed.")
+
+        return values, errors, x
 
     def prepare_bkg(self,
         bkg: Spectrum,
@@ -1195,21 +1188,14 @@ class Scan(BaseScan):
             else:
                 return None
 
-        elif isinstance(calib, tuple):
-            try:
-                calib_params = np.array(calib, dtype=np.float64)
-                assert calib_params.shape == (2, 2)
+        try:
+            calib_params = np.array(calib, dtype=np.float64)
+            assert calib_params.shape == (2, 2)
 
-            except:
-                raise ValueError(
-                    "Calibration parameters must be provided as "
-                    "((a0, err), (a1, err))."
-                )
-            
-            return calib_params
-
-        else:
+        except:
             raise ValueError("calib could not be parsed.")
+
+        return calib_params
 
     def counts(self,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
@@ -1657,8 +1643,7 @@ class EnergyScan(Scan):
 
     def assign_phem(self,
         reference: pd.DataFrame,
-        phem_label: Dict[str, Union[Sequence[str], int]],
-        phex_label: Dict[str, Union[Sequence[str], int]],
+        label: Dict[str, Union[Sequence[str], int]],
         calib_guess: Tuple[float, float],
         bins: int = 512,
     ) -> None:
@@ -1672,9 +1657,7 @@ class EnergyScan(Scan):
         app = get_qapp()
 
         # Intialize the viewer
-        mw = AssignPhem(
-            self, edges, reference, phem_label, phex_label, calib_guess
-        )
+        mw = AssignPhem(self, edges, reference, label, calib_guess)
         mw.show()
 
         # Run the application
