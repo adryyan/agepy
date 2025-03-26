@@ -520,7 +520,7 @@ class InteractiveFit(QtWidgets.QDialog):
                     "loc2_loc1", *self.constrain_dE
                 )
 
-        # Overwrite given starting values
+        # Overwrite with given starting values
         for par, val in self.start_values.items():
             if par in self.params:
                 self.params[par] = val

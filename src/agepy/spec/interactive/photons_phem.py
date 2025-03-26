@@ -1,5 +1,6 @@
 from __future__ import annotations
 import warnings
+from contextlib import contextmanager
 
 # Import PySide6 / PyQt6 modules
 try:
@@ -86,9 +87,8 @@ class AssignPhem(SpectrumViewer):
         self.phex = scan._phex_assignments.copy()
 
         if scan._phem_assignments is None:
-            scan._phem_assignments = pd.DataFrame(
-                columns=[*self.phem_label, *self.phex_label, "val", "err"]
-            )
+            col = [*self.phem_label, *self.phex_label, "model", "fit"]
+            scan._phem_assignments = pd.DataFrame(columns=col)
 
         # Set up the main window
         super().__init__(scan, edges)
@@ -98,10 +98,19 @@ class AssignPhem(SpectrumViewer):
             self.ax, self.assign, interactive=False, hint="Assign Peak"
         )
 
-        # Disable the calib action
-        self.calc_options[2] = False
-        self.actions[2].setChecked(False)
-        self.actions[2].setEnabled(False)
+        with _block_signals(*self.actions):
+            # Disable the calib action
+            self.calc_options[2] = False
+            self.actions[2].setChecked(False)
+            self.actions[2].setEnabled(False)
+
+            # Check the uncertainties, qeff and bkg actions
+            self.calc_options[0] = True
+            self.actions[0].setChecked(True)
+            self.calc_options[1] = True
+            self.actions[1].setChecked(True)
+            self.calc_options[3] = True
+            self.actions[3].setChecked(True)
 
         # Plot the first spectrum
         self.plot()
@@ -116,6 +125,20 @@ class AssignPhem(SpectrumViewer):
             phex_dict[key] = val
             phex_str += f"{key}={val}, "
         return phex, phex_dict, phex_str[:-2]
+
+    def find_phem(self, values: Dict[str, Union[str, int]]) -> pd.DataFrame:
+        phem = self.scan._phem_assignments.copy()
+
+        for key, val in values.items():
+            if phem.empty:
+                break
+
+            if key not in phem:
+                continue
+
+            phem.query(f"{key} == @val", inplace=True)
+
+        return phem
 
     def plot(self):
         # Prepare x -> wavelength conversion and vice versa
@@ -137,10 +160,21 @@ class AssignPhem(SpectrumViewer):
         else:
             error_prop = "none"
 
+        # Create a progress dialog
+        progress_dialog = QtWidgets.QProgressDialog(
+            "Calculating...", None, 0, 0, self
+        )
+        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
+
         self.y, self.yerr = self.scan.assigned_spectrum(
             phex_dict, self.edges, qeff=qeff, bkg=bkg, calib=calib,
             err_prop=error_prop, mc_samples=self.mc_samples
         )
+
+        # Close the progress dialog
+        progress_dialog.close()
 
         if not uncertainties:
             self.yerr = None
@@ -182,18 +216,11 @@ class AssignPhem(SpectrumViewer):
 
             # Plot the found assignments
             for i, row in phem.iterrows():
-                # Get the fit results
-                fit_val = row["val"]
-                fit_err = row["err"]
-
                 # Define x values
                 x = np.linspace(*self.xlim, 1000)
 
                 # Calculate the y values and their uncertainties
-                y, yerr = propagate(
-                    lambda par: par[0] * norm.pdf(x, *par[1:]), fit_val, fit_err**2
-                )
-                yerr = np.sqrt(np.diag(yerr))
+                y, yerr = row["fit"](x)
 
                 dx = self.edges[1] - self.edges[0]
                 y *= dx
@@ -273,6 +300,36 @@ class AssignPhem(SpectrumViewer):
         if dialog.exec():
             phem1 = dialog.get_input()
 
+            # Define starting values
+            start_values = {}
+
+            # Set the default signal model
+            sig1_model = "Gaussian"
+            sig2_model = "None"
+
+            # Find the index where to save the assignment
+            df = self.find_phem({**phem1, **phex_dict})
+
+            for l, val in phex_dict.items():
+                phem1[l] = val
+
+            if df.empty:
+                idx1 = self.scan._phem_assignments.index.max()
+                if np.isnan(idx1):
+                    idx1 = 0
+
+                else:
+                    idx1 += 1
+
+            else:
+                idx1 = df.index[0]
+
+                # Get the model and starting values
+                sig1_model = df.loc[idx1, "model"]
+                start_values = {
+                    f"{k}1": v for k, v in df.loc[idx1, "fit"].start_val(1).items()
+                }
+
         else:
             return
 
@@ -280,75 +337,56 @@ class AssignPhem(SpectrumViewer):
         if dialog.exec():
             phem2 = dialog.get_input()
 
-            debug_fit = InteractiveFit(
-                self, n, xe, sig=["Gaussian", "Gaussian"], bkg="Constant"
-            )
+            # Set the default signal model
+            sig2_model = "Gaussian"
+
+            # Find the index where to save the assignment
+            df = self.find_phem({**phem2, **phex_dict})
+
+            for l, val in phex_dict.items():
+                phem2[l] = val
+
+            if df.empty:
+                idx2 = idx1 + 1
+
+            else:
+                idx2 = df.index[0]
+
+                # Get the model and starting values
+                sig2_model = df.loc[idx2, "model"]
+                sv2 = {
+                    f"{k}2": v for k, v in df.loc[idx2, "fit"].start_val(1).items()
+                }
+                start_values = {**start_values, **sv2}
 
         else:
             phem2 = None
 
-            debug_fit = InteractiveFit(
-                self, n, xe, sig="Gaussian", bkg="Constant"
-            )
+        debug_fit = InteractiveFit(
+            self, n, xe, sig=[sig1_model, sig2_model], bkg="Constant",
+            **start_values
+        )
 
         # Fit the data
         if debug_fit.exec():
-            m = debug_fit.m
+            res1, res2 = debug_fit.fit_result()
 
-            # Find the index where to save the assignment
-            df = self.scan._phem_assignments.copy()
-            for l, val in phem1.items():
-                if df.empty:
-                    break
-
-                df.query(f"{l} == @val", inplace=True)
-
-            for l, val in phex.items():
-                phem1[l] = val
-                df.query(f"{l} == @val", inplace=True)
-
-            if df.empty:
-                idx = self.scan._phem_assignments.index.max()
-                if np.isnan(idx):
-                    idx = 0
-
-                else:
-                    idx += 1
-
-            else:
-                idx = df.index[0]
+            # Don't save the assignment if the fit failed
+            if res1 is None:
+                return
 
             # Create the new row
-            phem1["val"] = np.array(m.values["s1", "loc1", "scale1"])
-            phem1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
+            phem1 = {**phem1, **res1}
 
             # Save the assignment
-            self.scan._phem_assignments.loc[idx] = phem1
+            self.scan._phem_assignments.loc[idx1] = phem1
 
-            if phem2 is not None and  "loc2" in m.parameters:
-                # Find the index where to save the assignment
-                df = self.scan._phem_assignments.copy()
-                for l, val in phem2.items():
-                    if df.empty:
-                        break
-
-                    df.query(f"{l} == @val", inplace=True)
-
-                for l, val in phex.items():
-                    phem2[l] = val
-                    df.query(f"{l} == @val", inplace=True)
-
-                if df.empty:
-                    idx = self.scan._phem_assignments.index.max() + 1
-                else:
-                    idx = df.index[0]
-
+            if phem2 is not None and  res2 is not None:
                 # Create the new row
-                phem2["val"] = np.array(m.values["s2", "loc2", "scale2"])
-                phem2["err"] = np.array(m.errors["s2", "loc2", "scale2"])
-            
+                phem2 = {**phem2, **res2}
+
                 # Save the assignment
-                self.scan._phem_assignments.loc[idx] = phem2
+                self.scan._phem_assignments.loc[idx2] = phem2
 
         # Plot the results
         self.plot()
@@ -356,12 +394,32 @@ class AssignPhem(SpectrumViewer):
 
 class InteractiveFit(QtWidgets.QDialog):
 
+    sig_models = {
+        "Gaussian": lambda xr: Gaussian(xr),
+        "Q-Gaussian": lambda xr: QGaussian(xr),
+        "Voigt": lambda xr: Voigt(xr),
+        "Cruijff": lambda xr: Cruijff(xr),
+        "CrystalBall": lambda xr: CrystalBall(xr),
+        "CrystalBallEx": lambda xr: CrystalBallEx(xr),
+    }
+
+    bkg_models = {
+        "None": None,
+        "Constant": lambda xr: Constant(xr),
+        "Exponential": lambda xr: Exponential(xr),
+        "Bernstein1d": lambda xr: Bernstein(1, xr),
+        "Bernstein2d": lambda xr: Bernstein(2, xr),
+        "Bernstein3d": lambda xr: Bernstein(3, xr),
+        "Bernstein4d": lambda xr: Bernstein(4, xr),
+    }
+
     def __init__(self,
         parent: QtWidgets.QWidget,
         n: NDArray,
         xe: NDArray,
         sig: Union[str, Tuple[str, str]] = "Gaussian",
         bkg: str = "None",
+        **start_values
     ) -> None:
         # Initialize fit data
         self.n = n
@@ -374,9 +432,7 @@ class InteractiveFit(QtWidgets.QDialog):
         nsum = np.sum(n[:,0])
         self.s_start = nsum * 0.9
         self.s_limit = nsum * 1.1
-
-        # Initialize the list of available models
-        self._init_model_list()
+        self.start_values = start_values
 
         # Check the signal and background models
         if isinstance(sig, str):
@@ -395,19 +451,13 @@ class InteractiveFit(QtWidgets.QDialog):
         if bkg not in self.bkg_models.keys():
             raise ValueError(f"Background model {bkg} not found.")
 
+        # Set signal and background models
+        self.sig1 = None
+        self.sig2 = None
+        self.bkg = None
+
         # Initialize the parameters
         self.params = {}
-
-        # jit compile the numerical integration of the pdf
-
-        @nb.njit(parallel=True, fastmath={"reassoc", "contract", "arcp"})
-        def numint_cdf(_x, _pdf):
-            y = np.empty_like(_x)
-            for i in nb.prange(len(_x)):
-                y[i] = np.trapz(_pdf[:i+1], x=_x[:i+1])
-            return y
-
-        self.numint_cdf = numint_cdf
 
         # Initialize the parent class
         super().__init__(parent)
@@ -483,6 +533,12 @@ class InteractiveFit(QtWidgets.QDialog):
             alignment=QtCore.Qt.AlignmentFlag.AlignLeft
         )
 
+        # Set the column stretch factors
+        self.layout.setColumnStretch(0, 2)  # Signal group column
+        self.layout.setColumnStretch(1, 2)  # Signal group column
+        self.layout.setColumnStretch(2, 1)  # Background group column
+        self.layout.setColumnStretch(3, 0)  # Button group column
+
         # Create the initial fit widget
         self.prepare_fit()
 
@@ -502,72 +558,98 @@ class InteractiveFit(QtWidgets.QDialog):
         # Remember current parameters and limits
         params_prev = self.params.copy()
 
-        # Get the first signal model and parameters
-        sig1_integral, sig1_params, sig1_limits = self.sig_models[sig1]()
+        # Get the first signal model, starting values and limits
+        sig1 = self.sig_models[sig1](self.xr)
+        par1 = sig1.start_val(self.s_start)
+        lim1 = sig1.limits(self.s_limit)
 
         # Append a 1 to the parameter names
-        sig1_params = {f"{k}1": v for k, v in sig1_params.items()}
-        sig1_limits = {f"{k}1": v for k, v in sig1_limits.items()}
+        par1 = {f"{k}1": v for k, v in par1.items()}
+        lim1 = {f"{k}1": v for k, v in lim1.items()}
+
+        self.sig1 = sig1
 
         # Initialize the signal and background models
         if bkg == "None" and sig2 == "None":
             # Update the parameters and limits
-            self.params = sig1_params
-            limits = sig1_limits
+            self.params = par1
+            limits = lim1
 
             def integral(x, *args):
-                return sig1_integral(x, args)
+                return sig1.cdf(x, args)
 
         elif sig2 == "None":
             # Get the background model and parameters
-            bkg_integral, bkg_params, bkg_limits = self.bkg_models[bkg]()
-            
-            # Combine the parameters and limits
-            self.params = {**sig1_params, **bkg_params}
-            limits = {**sig1_limits, **bkg_limits}
+            bkg = self.bkg_models[bkg](self.xr)
+            par2 = bkg.start_val()
+            lim2 = bkg.limits()
 
-            idx = len(sig1_params)
+            self.bkg = bkg
+
+            # Combine the parameters and limits
+            self.params = {**par1, **par2}
+            limits = {**lim1, **lim2}
+
+            idx = len(par1)
 
             def integral(x, *args):
-                return sig1_integral(x, args[:idx]) + bkg_integral(x, args[idx:])
+                return sig1.cdf(x, args[:idx]) + bkg.cdf(x, args[idx:])
 
         elif bkg == "None":
             # Get the model and parameters of the second signal component
-            sig2_integral, sig2_params, sig2_limits = self.sig_models[sig2]()
+            sig2 = self.sig_models[sig2](self.xr)
+            par2 = sig2.start_val(self.s_start)
+            lim2 = sig2.limits(self.s_limit)
 
             # Append a 2 to the parameter names
-            sig2_params = {f"{k}2": v for k, v in sig2_params.items()}
-            sig2_limits = {f"{k}2": v for k, v in sig2_limits.items()}
-            
-            # Combine the parameters and limits
-            self.params = {**sig1_params, **sig2_params}
-            limits = {**sig1_limits, **sig2_limits}
+            par2 = {f"{k}2": v for k, v in par2.items()}
+            lim2 = {f"{k}2": v for k, v in lim2.items()}
 
-            idx = len(sig1_params)
+            self.sig2 = sig2
+
+            # Combine the parameters and limits
+            self.params = {**par1, **par2}
+            limits = {**lim1, **lim2}
+
+            idx = len(par1)
 
             def integral(x, *args):
-                return sig1_integral(x, args[:idx]) + sig2_integral(x, args[idx:])
+                return sig1.cdf(x, args[:idx]) + sig2.cdf(x, args[idx:])
 
         else:
-            # Get the background model and parameters
-            bkg_integral, bkg_params, bkg_limits = self.bkg_models[bkg]()
-
             # Get the model and parameters of the second signal component
-            sig2_integral, sig2_params, sig2_limits = self.sig_models[sig2]()
+            sig2 = self.sig_models[sig2](self.xr)
+            par2 = sig2.start_val(self.s_start)
+            lim2 = sig2.limits(self.s_limit)
 
             # Append a 2 to the parameter names
-            sig2_params = {f"{k}2": v for k, v in sig2_params.items()}
-            sig2_limits = {f"{k}2": v for k, v in sig2_limits.items()}
+            par2 = {f"{k}2": v for k, v in par2.items()}
+            lim2 = {f"{k}2": v for k, v in lim2.items()}
+
+            self.sig2 = sig2
+
+            # Get the background model and parameters
+            bkg = self.bkg_models[bkg](self.xr)
+            par3 = bkg.start_val()
+            lim3 = bkg.limits()
+
+            self.bkg = bkg
 
             # Combine the parameters and limits
-            self.params = {**sig1_params, **sig2_params, **bkg_params}
-            limits = {**sig1_limits, **sig2_limits, **bkg_limits}
+            self.params = {**par1, **par2, **par3}
+            limits = {**lim1, **lim2, **lim3}
 
-            idx1 = len(sig1_params)
-            idx2 = len(sig2_params) + idx1
+            idx1 = len(par1)
+            idx2 = len(par2) + idx1
 
             def integral(x, *args):
-                return sig1_integral(x, args[:idx1]) + sig2_integral(x, args[idx1:idx2]) + bkg_integral(x, args[idx2:])
+                return sig1.cdf(x, args[:idx1]) + sig2.cdf(x, args[idx1:idx2]) \
+                    + bkg.cdf(x, args[idx2:])
+
+        # Overwrite with given starting values
+        for par, val in self.start_values.items():
+            if par in self.params:
+                self.params[par] = val
 
         # Keep previous parameters and limits if possible
         for par in params_prev:
@@ -578,7 +660,9 @@ class InteractiveFit(QtWidgets.QDialog):
         c = cost.ExtendedBinnedNLL(self.n, self.xe, integral)
 
         # Update the Minuit object
-        self.m = Minuit(c, *list(self.params.values()), name=list(self.params.keys()))
+        self.m = Minuit(
+            c, *list(self.params.values()), name=list(self.params.keys())
+        )
         
         # Set the limits
         for par, lim in limits.items():
@@ -593,163 +677,363 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def _init_model_list(self) -> None:
-        self.sig_models = {
-            "Gaussian": self.gaussian,
-            "Q-Gaussian": self.qgaussian,
-            "Voigt": self.voigt,
-            "Cruijff": self.cruijff,
-            "CrystalBall": self.crystalball,
-            "CrystalBallEx": self.crystalball_ex,
-        }
-        self.bkg_models = {
-            "None": None,
-            "Constant": self.constant,
-            "Exponential": self.exponential,
-            "Bernstein1d": lambda: self.bernstein(1),
-            "Bernstein2d": lambda: self.bernstein(2),
-            "Bernstein3d": lambda: self.bernstein(3),
-            "Bernstein4d": lambda: self.bernstein(4),
-        }
+    def fit_result(self):
+        if not self.m.valid:
+            return None, None
 
-    def gaussian(self) -> Tuple[callable, dict, dict]:
+        # Get the covariance matrix
+        cov = np.array(self.m.covariance)
+        print(cov)
+
+        # Get the fit results for sig1
+        sig1 = {}
+
+        # Get the model name
+        sig1["model"] = self.sig_comp1.currentText()
+
+        # Append 1 to the parameter names
+        par1 = [f"{k}1" for k in self.sig1.par]
+
+        # Get fitted parameter values and uncertainties
+        self.sig1.val = np.array(self.m.values[par1])
+        self.sig1.err = np.array(self.m.errors[par1])
+
+        # Get the covariance matrix for sig1
+        self.sig1.cov = cov[:len(par1), :len(par1)]
+        print(self.sig1.cov)
+        
+        # Set the fit results for sig1
+        sig1["fit"] = self.sig1
+
+        if self.sig2 is None:
+            return sig1, None
+
+        # Get the fit results for sig2
+        sig2 = {}
+
+        # Get the model name
+        sig2["model"] = self.sig_comp2.currentText()
+
+        # Append 2 to the parameter names
+        par2 = [f"{k}2" for k in self.sig2.par]
+
+        # Get fitted parameter values and uncertainties
+        self.sig2.val = np.array(self.m.values[par2])
+        self.sig2.err = np.array(self.m.errors[par2])
+
+        # Get the covariance matrix for sig2
+        idx1 = len(par1)
+        idx2 = idx1 + len(par2)
+        self.sig2.cov = cov[idx1:idx2, idx1:idx2]
+        print(self.sig2.cov)
+        
+        # Set the fit results for sig2
+        sig2["fit"] = self.sig2
+
+        return sig1, sig2
+
+
+class FitModel:
+
+    def __init__(self,
+        xr: Tuple[float, float],
+    ) -> None:
+        self.xr = xr
+
+        # Fit results
+        self.val = None
+        self.err = None
+        self.cov = None
+
+    def __call__(self, x: NDArray) -> Tuple[NDArray, NDArray]:
+        if self.cov is None:
+            raise ValueError("Fit results are not available.")
+
+        # Propagate the uncertainties
+        y, yerr = propagate(lambda par: self.pdf(x, par), self.val, self.cov)
+
+        return y, np.sqrt(np.diag(yerr))
+
+    def start_val(self, n):
+        if self.val is not None:
+            return {k: v for k, v in zip(self.par, self.val)}
+        
+        else:
+            return self._start_val(n)
+
+
+class Gaussian(FitModel):
+
+    par = ["s", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * norm.pdf(x, *par[1:])
+
+    @staticmethod
+    def cdf(x, par):
+        return par[0] * norm.cdf(x, *par[1:])
+
+    def limits(self, n_max):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * dx
-        }
-        limits = {
-            "s": (0, self.s_limit), "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx)
+
+        return {
+            "s": (0, n_max), "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
         }
 
-        def integral(x, par):
-            return par[0] * norm.cdf(x, *par[1:])
+    def _start_val(self, n):
+        return {
+            "s": n, "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0])
+        }
 
-        return integral, params, limits
 
-    def qgaussian(self) -> Tuple[callable, dict, dict]:
+class Voigt(FitModel):
+
+    par = ["s", "gamma", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * voigt.pdf(x, *par[1:])
+
+    def cdf(self, x, par):
+        _x = np.linspace(self.xr[0], self.xr[1], 1000)
+        return par[0] * num_eval_cdf(x, _x, voigt.pdf(_x, *par[1:]))
+
+    def limits(self, n_max):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "q": 2, "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * dx
-        }
-        limits = {
-            "s": (0, self.s_limit), "q": (1, 3), "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx)
-        }
 
-        def integral(x, par):
-            if par[1] < 1:
-                par[1] = 1
-                warnings.warn("q cannot be smaller than 1. Setting q=1.")
-            if par[1] > 3:
-                par[1] = 3
-                warnings.warn("q cannot be larger than 3. Setting q=3.")
-            return par[0] * qgaussian.cdf(x, *par[1:])
-
-        return integral, params, limits
-
-    def voigt(self) -> Tuple[callable, dict, dict]:
-        dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "gamma": 0.1 * dx,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]), "scale": 0.05 * dx
-        }
-        limits = {
-            "s": (0, self.s_limit), "gamma": (0.0001 * dx, 0.5 * dx),
+        return {
+            "s": (0, n_max), "gamma": (0.0001 * dx, 0.5 * dx),
             "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
         }
 
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-
-        def integral(x, par):
-            _cdf = self.numint_cdf(_x, voigt.pdf(_x, *par[1:]))
-            return par[0] * np.interp(x, _x, _cdf)
-
-        return integral, params, limits
-
-    def cruijff(self) -> Tuple[callable, dict, dict]:
+    def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "beta_left": 0.1, "beta_right": 0.1,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale_left": 0.05 * dx, "scale_right": 0.05 * dx
+
+        return {
+            "s": n, "gamma": 0.1 * dx, "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0])
         }
-        limits = {
-            "s": (0, self.s_limit), "beta_left": (0, 1), "beta_right": (0, 1),
+
+
+class QGaussian(FitModel):
+
+    par = ["s", "q", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        if par[1] < 1:
+            par[1] = 1
+            warnings.warn("q cannot be smaller than 1. Setting q=1.")
+
+        if par[1] > 3:
+            par[1] = 3
+            warnings.warn("q cannot be larger than 3. Setting q=3.")
+
+        return par[0] * qgaussian.pdf(x, *par[1:])
+
+    def cdf(self, x, par):
+        if par[1] < 1:
+            par[1] = 1
+            warnings.warn("q cannot be smaller than 1. Setting q=1.")
+
+        if par[1] > 3:
+            par[1] = 3
+            warnings.warn("q cannot be larger than 3. Setting q=3.")
+
+        return par[0] * qgaussian.cdf(x, *par[1:])
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max), "q": (1, 3), "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx)
+        }
+
+    def _start_val(self, n):
+        return {
+            "s": n, "q": 2, "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0])
+        }
+
+
+class Cruijff(FitModel):
+
+    par = ["s", "beta_left", "beta_right", "loc", "scale_left", "scale_right"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * cruijff.density(x, *par[1:])
+
+    def cdf(self, x, par):
+        _x = np.linspace(self.xr[0], self.xr[1], 1000)
+        return par[0] * num_eval_cdf(x, _x, cruijff.density(_x, *par[1:]))
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max), "beta_left": (0, 1), "beta_right": (0, 1),
             "loc": self.xr, "scale_left": (0.0001 * dx, 0.5 * dx),
             "scale_right": (0.0001 * dx, 0.5 * dx)
         }
 
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-
-        def integral(x, par):
-            _cdf = self.numint_cdf(_x, cruijff.density(_x, *par[1:]))
-            return par[0] / _cdf[-1] * np.interp(x, _x, _cdf)
-
-        return integral, params, limits
-
-    def crystalball(self) -> Tuple[callable, dict, dict]:
+    def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "beta": 1, "m": 2,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]), "scale": 0.05 * dx
+
+        return {
+            "s": n, "beta_left": 0.1, "beta_right": 0.1,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale_left": 0.05 * dx, "scale_right": 0.05 * dx
         }
-        limits = {
-            "s": (0, self.s_limit), "beta": (0, 5), "m": (1, 10),
+
+
+class CrystalBall(FitModel):
+
+    par = ["s", "beta", "m", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * crystalball.pdf(x, *par[1:])
+
+    @staticmethod
+    def cdf(x, par):
+        return par[0] * crystalball.cdf(x, *par[1:])
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max), "beta": (0, 5), "m": (1, 10),
             "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
         }
 
-        def integral(x, par):
-            return par[0] * crystalball.cdf(x, *par[1:])
-
-        return integral, params, limits
-
-    def crystalball_ex(self) -> Tuple[callable, dict, dict]:
+    def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s": self.s_start, "beta_left": 1, "m_left": 2,
-            "scale_left": 0.05 * dx, "beta_right": 1, "m_right": 2,
-            "scale_right": 0.05 * dx, "loc": 0.5 * (self.xr[0] + self.xr[1])
+
+        return {
+            "s": n, "beta": 1, "m": 2,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]), "scale": 0.05 * dx
         }
-        limits = {
-            "s": (0, self.s_limit), "beta_left": (0, 5), "m_left": (1, 10),
+
+
+class CrystalBallEx(FitModel):
+
+    par = [
+        "s", "beta_left", "m_left", "scale_left", "beta_right", "m_right",
+        "scale_right", "loc"
+    ]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * crystalball_ex.pdf(x, *par[1:])
+    
+    @staticmethod
+    def cdf(x, par):
+        return par[0] * crystalball_ex.cdf(x, *par[1:])
+    
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max), "beta_left": (0, 5), "m_left": (1, 10),
             "scale_left": (0.0001 * dx, 0.5 * dx), "beta_right": (0, 5),
             "m_right": (1, 10), "scale_right": (0.0001 * dx, 0.5 * dx),
             "loc": self.xr
         }
+    
+    def _start_val(self, n):
+        dx = self.xr[1] - self.xr[0]
 
-        def integral(x, par):
-            return par[0] * crystalball_ex.cdf(x, *par[1:])
+        return {
+            "s": n, "beta_left": 1, "m_left": 2, "scale_left": 0.05 * dx,
+            "beta_right": 1, "m_right": 2, "scale_right": 0.05 * dx,
+            "loc": 0.5 * (self.xr[0] + self.xr[1])
+        }
 
-        return integral, params, limits
 
-    def constant(self) -> Tuple[callable, dict, dict]:
-        params = {"b": 1}
-        limits = {"b": (0, None)}
+class Bernstein(FitModel):
 
-        def integral(x, par):
-            return par[0] * uniform.cdf(x, self.xr[0], self.xr[1] - self.xr[0])
+    par = ["b_ij"]
 
-        return integral, params, limits
+    def __init__(self,
+        deg: int,
+        xr: Tuple[float, float],
+    ) -> None:
+        super().__init__(xr)
 
-    def exponential(self) -> Tuple[callable, dict, dict]:
-        params = {"b": 1, "loc_expon": 0, "scale_expon": 1}
-        limits = {
+        self.deg = deg
+        self.par = [f"b_{i}{deg}" for i in range(deg+1)]
+
+    def pdf(self, x, par):
+        return bernstein.density(x, par, *self.xr)
+
+    def cdf(self, x, par):
+        return bernstein.integral(x, par, *self.xr)
+
+    def limits(self):
+        return {f"b_{i}{self.deg}": (0, None) for i in range(self.deg+1)}
+
+    def start_val(self):
+        return {f"b_{i}{self.deg}": 1 for i in range(self.deg+1)}
+
+
+class Constant(FitModel):
+    
+    par = ["b"]
+
+    def pdf(self, x, par):
+        return par[0] * uniform.pdf(x, self.xr[0], self.xr[1] - self.xr[0])
+
+    def cdf(self, x, par):
+        return par[0] * uniform.cdf(x, self.xr[0], self.xr[1] - self.xr[0])
+
+    def limits(self):
+        return {"b": (0, None)}
+
+    def start_val(self):
+        return {"b": 1}
+
+
+class Exponential(FitModel):
+
+    par = ["b", "loc_expon", "scale_expon"]
+
+    def pdf(self, x, par):
+        return par[0] * truncexpon.pdf(x, self.xr[0], self.xr[1], *par[1:])
+
+    def cdf(self, x, par):
+        return par[0] * truncexpon.cdf(x, self.xr[0], self.xr[1], *par[1:])
+
+    def limits(self):
+        return {
             "b": (0, None), "loc_expon": (-1, 0), "scale_expon": (-100, 100)
         }
 
-        def integral(x, par):
-            return par[0] * truncexpon.cdf(x, self.xr[0], self.xr[1], *par[1:])
+    def start_val(self):
+        return {"b": 1, "loc_expon": -0.5, "scale_expon": 1}
 
-        return integral, params, limits
 
-    def bernstein(self, deg: int) -> Tuple[callable, dict, dict]:
-        params = {f"b_{i}{deg}": 1 for i in range(deg+1)}
-        limits = {f"b_{i}{deg}": (0, None) for i in range(deg+1)}
+@nb.njit(parallel=True, fastmath={"reassoc", "contract", "arcp"})
+def num_eval_cdf(x, _x, _pdf):
+    _y = np.empty_like(_x)
 
-        def integral(x, args):
-            return bernstein.integral(x, args, self.xr[0], self.xr[1])
+    for i in nb.prange(len(_x)):
+        _y[i] = np.trapz(_pdf[:i+1], x=_x[:i+1])
 
-        return integral, params, limits
+    return np.interp(x, _x, _y)
+
+
+@contextmanager
+def _block_signals(*widgets):
+    for w in widgets:
+        w.blockSignals(True)
+
+    try:
+        yield
+
+    finally:
+        for w in widgets:
+            w.blockSignals(False)

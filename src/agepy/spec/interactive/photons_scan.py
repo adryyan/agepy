@@ -6,7 +6,7 @@ from importlib.resources import path as ilrpath
 
 # Import PySide6 / PyQt6 modules
 try:
-    from PySide6 import QtGui
+    from PySide6 import QtGui, QtWidgets, QtCore
 
     qt_binding = "PySide6"
 
@@ -14,7 +14,7 @@ except ImportError:
     warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
 
     try:
-        from PyQt6 import QtGui
+        from PyQt6 import QtGui, QtWidgets, QtCore
 
         qt_binding = "PyQt6"
 
@@ -107,10 +107,21 @@ class SpectrumViewer(MainWindow):
         else:
             error_prop = "none"
 
+        # Create a progress dialog
+        progress_dialog = QtWidgets.QProgressDialog(
+            "Calculating...", None, 0, 0, self
+        )
+        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
+
         self.y, self.yerr = self.scan.spectrum_at(
             self.step, self.edges, qeff=qeff, bkg=bkg, calib=calib,
             err_prop=error_prop, mc_samples=self.mc_samples
         )
+
+        # Close the progress dialog
+        progress_dialog.close()
 
         if not uncertainties:
             self.yerr = None

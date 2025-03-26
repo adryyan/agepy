@@ -1706,10 +1706,6 @@ class EnergyScan(Scan):
             # Look for the transition in the reference data
             label = ""
             for key, value in row.items():
-                # Skip the fit values
-                if key in ["val", "err"]:
-                    continue
-
                 # Skip not existing keys
                 if key not in ref.columns:
                     continue
@@ -1725,8 +1721,13 @@ class EnergyScan(Scan):
             # Remove the last comma and space
             label = label[:-2]
 
+            # Get the fit result
+            idx = row["fit"].par.index("loc")
+            val = row["fit"].val[idx]
+            err = row["fit"].err[idx]
+
             # Append the found match
-            fit_wl.append([row["val"][1], row["err"][1]])
+            fit_wl.append([val, err])
             ref_wl.append(ref["E"].iloc[0])
             labels.append(label)
 
