@@ -12,6 +12,8 @@ from numba import njit, prange
 from jacobi import propagate
 from scipy.stats import norm
 import pandas as pd
+from matplotlib import gridspec
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import h5py
 
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
     from iminuit import Minuit
+    from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
     "QEffScan", "Spectrum", "Scan", "EnergyScan", "available_anodes",
@@ -311,6 +314,142 @@ class Spectrum:
 
         # Initialize the Spectrum
         return cls(anode.process(raw), time=time, **norm)
+
+    def xy(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get the detector image of the spectrum.
+
+        Returns
+        -------
+        np.ndarray
+            The x and y values of the photon hits.
+
+        """
+        return self._xy[:,0], self._xy[:,1]
+
+    def det_image(self,
+        bins: Union[ArrayLike, Tuple[ArrayLike, ArrayLike]] = None,
+        x_lim: Tuple[float, float] = (0, 1),
+        y_lim: Tuple[float, float] = (0, 1),
+        figsize: Tuple[float, float] = (6, 6),
+        num: Union[str, int] = None,
+        fig: Figure = None,
+        ax: Tuple[Axes, Axes, Axes, Axes] = None,
+    ) -> Tuple[Figure, Axes]:
+        """Plot the detector image of the spectrum.
+
+        Parameters
+        ----------
+        ax: Axes, optional
+            Axes object to plot the detector image on. If not provided,
+            a new figure is created.
+
+        Returns
+        -------
+        Tuple[Figure, Axes]
+            The figure and axes objects of the plot.
+
+        """
+        # Create the figure
+        if fig is None or ax is None:
+            fig = plt.figure(num=num, figsize=figsize, clear=True)
+
+            # grid with columns=2, row=2
+            gs = gridspec.GridSpec(
+                2, 2, width_ratios=[3, 1], height_ratios=[1, 3],
+                wspace=0.05, hspace=0.05
+            )
+
+            # 2d detector image is subplot 2: lower left
+            ax_det = plt.subplot(gs[2])
+
+            # x projection is subplot 0: upper left
+            ax_x = plt.subplot(gs[0], sharex=ax_det)
+
+            # y projection is subplot 3: lower right
+            ax_y = plt.subplot(gs[3], sharey=ax_det)
+
+            # colorbar is subplot 1: upper right
+            ax_cb = plt.subplot(gs[1])
+            ax_cb.axis("off")
+            ax_cb_inset = ax_cb.inset_axes([0.0, 0.0, 0.25, 1.0])
+
+            # Remove x and y tick labels
+            ax_x.tick_params(axis='both', labelbottom=False)
+            ax_y.tick_params(axis='both', labelleft=False)
+
+            # Remove grid from the detector image and colorbar
+            ax_det.grid(False)
+            ax_cb_inset.grid(False)
+
+        else:
+            try:
+                ax_det, ax_x, ax_y, ax_cb_inset = ax
+
+                ax_det.clear()
+                ax_x.clear()
+                ax_y.clear()
+                ax_cb_inset.clear()
+
+            except:
+                raise ValueError("Invalid axes sequence provided.")
+
+        # Get the data
+        x, y = self.xy()
+
+        if bins is None:
+            # Define x and y edges
+            bins = np.histogram([], bins=512, range=(0, 1))[1]
+
+        # Histogram the data
+        hist_xy, x_edges, y_edges = np.histogram2d(x, y, bins=bins)
+
+        # Define a meshgrid
+        x_mesh, y_mesh = np.meshgrid(x_edges, y_edges)
+
+        # Get a colormap from matplotlib
+        cmap = plt.get_cmap("YlOrBr_r")
+
+        # Get color for the projections
+        color = cmap(0)
+
+        # Set the lowest value to white
+        colors = cmap(np.linspace(0, 1, cmap.N))
+        colors[0] = (1, 1, 1, 1)
+
+        # Create a colormap with white as the lowest value
+        cmap = mcolors.ListedColormap(colors)
+
+        # Plot the detector image
+        pcm = ax_det.pcolormesh(
+            x_mesh, y_mesh, hist_xy.T, cmap=cmap, rasterized=True
+        )
+
+        # Create a colorbar
+        fig.colorbar(pcm, cax=ax_cb_inset)
+
+        # Project the detector image onto the x and y axes
+        hist_x = np.histogram(x, bins=x_edges)[0]
+        hist_y = np.histogram(y, bins=y_edges)[0]
+
+        # Plot the x and y projections
+        ax_x.stairs(hist_x, x_edges, color=color)
+        ax_y.stairs(hist_y, y_edges, color=color, orientation="horizontal")
+
+        # Remove the first tick label of the x and y projection
+        plt.setp(ax_x.get_yticklabels()[0], visible=False)
+        plt.setp(ax_y.get_xticklabels()[0], visible=False)
+
+        # Set the limits (this changes the positon of ax_det)
+        ax_det.set_xlim(x_lim)
+        ax_x.set_xlim(x_lim)
+        ax_det.set_ylim(y_lim)
+        ax_y.set_ylim(y_lim)
+
+        # Set the labels
+        ax_det.set_xlabel("x [arb. u.]")
+        ax_det.set_ylabel("y [arb. u.]")
+
+        return fig, (ax_det, ax_x, ax_y, ax_cb_inset)
 
     def counts(self,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
@@ -2243,3 +2382,96 @@ class QEffScan(Scan):
         """
         with open(filepath, "rb") as f:
             return pickle.load(f)
+
+
+class RotationScan(Scan):
+    """Scan over grating positions with a spectrum for each step.
+
+    Parameters
+    ----------
+    data_files: Sequence[str]
+        List of data files to be processed.
+    anode: PositionAnode
+        Anode object from `agepy.spec.photons`.
+    raw: str, optional
+        Path to the raw data in the data files. Default:
+        "dld_rd#raw/0".
+    time_per_step: int, optional
+        Time per step in the scan. Default: None.
+    **norm
+        Path to normalization parameters in the h5 data files.
+
+    Attributes
+    ----------
+    spectra: np.ndarray
+        Array of the loaded Spectrum objects.
+    energies: np.ndarray
+        Array of the scan variable values.
+
+    """
+
+    def __init__(self,
+        data_files: Sequence[str],
+        anode: PositionAnode,
+        raw: str = "dld_rd#raw",
+        time_per_step: Union[int, Sequence[int]] = None,
+        **norm,
+    ) -> None:
+        # Force the roi to cover the full detector
+        roi = ((0, 1), (0, 1))
+
+        # Load and process data
+        super().__init__(data_files, anode, None, raw, time_per_step, roi, **norm)
+
+        # Initialize the result arrays
+        self._rot = np.full(len(self.steps), np.nan, dtype=np.float64)
+        self._err = np.full(len(self.steps), np.nan, dtype=np.float64)
+
+    @property
+    def calib(self) -> None:
+        return None
+
+    @calib.setter
+    def calib(self, value) -> None:
+        raise AttributeError("Calibration can not be set for QEffScan.")
+
+    @property
+    def qeff(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return None
+    
+    @qeff.setter
+    def qeff(self, value) -> None:
+        raise AttributeError("Quantum efficiency can not be set for QEffScan.")
+
+    @property
+    def rotation(self) -> Tuple[float, float]:
+        # Remove nan values
+        inds = np.argwhere(~np.isnan(self._rot)).flatten()
+
+        if len(inds) == 0:
+            raise ValueError("No rotation values found.")
+
+        rot = self._rot[inds]
+
+        std = np.std(rot, ddof=1)
+        mean = np.mean(rot)
+
+        return mean, std
+
+
+    def interactive(self, bins: int = 512, mc_samples=10000) -> int:
+        """Plot the spectra in an interactive window.
+
+        """
+        from agepy.interactive import get_qapp
+        from agepy.spec.interactive.photons_rot import EvalRot
+
+        # Get the Qt application
+        app = get_qapp()
+
+        # Intialize the viewer
+        mw = EvalRot(self)
+        mw.show()
+
+        # Run the application
+        return app.exec()

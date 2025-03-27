@@ -1,6 +1,5 @@
 from __future__ import annotations
 import warnings
-from contextlib import contextmanager
 
 # Import PySide6 / PyQt6 modules
 try:
@@ -35,6 +34,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Import internal modules
+from agepy.interactive import _block_signals
 from agepy.spec.interactive.assignment_dialog import AssignmentDialog
 from agepy.spec.interactive.photons_scan import SpectrumViewer
 from agepy import ageplot
@@ -1028,16 +1028,3 @@ def num_eval_cdf(x, _x, _pdf):
         _y[i] = np.trapz(_pdf[:i+1], x=_x[:i+1])
 
     return np.interp(x, _x, _y)
-
-
-@contextmanager
-def _block_signals(*widgets):
-    for w in widgets:
-        w.blockSignals(True)
-
-    try:
-        yield
-
-    finally:
-        for w in widgets:
-            w.blockSignals(False)

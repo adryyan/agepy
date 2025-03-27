@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 import warnings
+from contextlib import contextmanager
 
 # Import importlib.resources for getting the icon paths
 from importlib.resources import path as ilrpath
@@ -81,13 +82,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas = None
         self.toolbar = None
 
-    def add_plot(
-        self,
+    def add_plot(self,
         fig: Figure = None,
         ax: Union[Axes, Sequence[Axes]] = None,
         layout: QtWidgets.QLayout = None,
         width: int = 1280,
-        height: int = 720
+        height: int = 720,
     ) -> None:
         # Draw with the agepy plotting style, but don't overwrite the
         # users rcParams
@@ -115,9 +115,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
             else:
                 self.ax = self.canvas.figure.add_subplot(111)
-
-            # Draw the empty plot
-            self.canvas.draw()
 
     def add_toolbar(self):
         # Check if a canvas exists
@@ -221,3 +218,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # Connect the actions to the callback and add to toolbar
         lu.triggered.connect(callback)
         self.lu = self.toolbar.insertAction(actions[-1], lu)
+
+
+@contextmanager
+def _block_signals(*widgets):
+    for w in widgets:
+        w.blockSignals(True)
+
+    try:
+        yield
+
+    finally:
+        for w in widgets:
+            w.blockSignals(False)
