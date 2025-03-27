@@ -2398,14 +2398,12 @@ class RotationScan(Scan):
         "dld_rd#raw/0".
     time_per_step: int, optional
         Time per step in the scan. Default: None.
-    **norm
-        Path to normalization parameters in the h5 data files.
 
     Attributes
     ----------
     spectra: np.ndarray
         Array of the loaded Spectrum objects.
-    energies: np.ndarray
+    steps: np.ndarray
         Array of the scan variable values.
 
     """
@@ -2415,17 +2413,16 @@ class RotationScan(Scan):
         anode: PositionAnode,
         raw: str = "dld_rd#raw",
         time_per_step: Union[int, Sequence[int]] = None,
-        **norm,
     ) -> None:
         # Force the roi to cover the full detector
         roi = ((0, 1), (0, 1))
 
         # Load and process data
-        super().__init__(data_files, anode, None, raw, time_per_step, roi, **norm)
+        super().__init__(data_files, anode, None, raw, time_per_step, roi)
 
-        # Initialize the result arrays
-        self._rot = np.full(len(self.steps), np.nan, dtype=np.float64)
-        self._err = np.full(len(self.steps), np.nan, dtype=np.float64)
+        # Set attributes
+        self._angle = None
+        self._offset = None
 
     @property
     def calib(self) -> None:
@@ -2444,22 +2441,14 @@ class RotationScan(Scan):
         raise AttributeError("Quantum efficiency can not be set for QEffScan.")
 
     @property
-    def rotation(self) -> Tuple[float, float]:
-        # Remove nan values
-        inds = np.argwhere(~np.isnan(self._rot)).flatten()
+    def rotation(self) -> NDArray:
+        return self._angle
 
-        if len(inds) == 0:
-            raise ValueError("No rotation values found.")
+    @property
+    def offset(self) -> NDArray:
+        return self._offset
 
-        rot = self._rot[inds]
-
-        std = np.std(rot, ddof=1)
-        mean = np.mean(rot)
-
-        return mean, std
-
-
-    def interactive(self, bins: int = 512, mc_samples=10000) -> int:
+    def interactive(self, angle: float, offset: Tuple[float, float]) -> int:
         """Plot the spectra in an interactive window.
 
         """
@@ -2470,7 +2459,7 @@ class RotationScan(Scan):
         app = get_qapp()
 
         # Intialize the viewer
-        mw = EvalRot(self)
+        mw = EvalRot(self, angle, offset)
         mw.show()
 
         # Run the application

@@ -13,18 +13,7 @@ except ImportError:
 # Import the modules for the fitting
 try:
     from iminuit import Minuit, cost
-    from iminuit.qtwidget import make_widget
-    from numba_stats import (
-        bernstein,
-        norm,
-        truncexpon,
-        uniform,
-        voigt,
-        cruijff,
-        crystalball,
-        crystalball_ex,
-        qgaussian
-    )
+    from numba_stats import voigt
 
 except ImportError:
     raise ImportError("iminuit and numba_stats required for fitting.")
@@ -54,10 +43,30 @@ class EvalRot(MainWindow):
 
     """
 
-    def __init__(self, scan: Scan, intial_guess=0) -> None:
+    def __init__(self,
+        scan: Scan,
+        angle: float,
+        offset: Tuple[float, float]
+    ) -> None:
         self.scan = scan
         self.step = 0
-        self.rot = intial_guess
+
+        # Set the starting values for the fit
+        self.start_values = {
+            "theta": np.radians(angle),
+            "dx": offset[0],
+            "dy": offset[1],
+        }
+
+        # Set the limits for the fit
+        self.limits = {
+            "theta": (-np.pi, np.pi),
+            "dx": (-0.01, 0.01),
+            "dy": (-0.01, 0.01),
+        }
+
+        # Cost function
+        self.cost = None
 
         # Get the first detector image
         self.fig, ax = self.scan.spectra[self.step].det_image(
@@ -65,7 +74,7 @@ class EvalRot(MainWindow):
         )
 
         # Set up the main window
-        super().__init__(title="Find Optimal Rotation", width=720, height=720)
+        super().__init__(title="Find Optimal Rotation", width=1080, height=1080)
 
         # Define size policy
         size_policy = QtWidgets.QSizePolicy(
@@ -81,15 +90,26 @@ class EvalRot(MainWindow):
 
         # Set up the canvas
         self.add_plot(
-            fig=self.fig, ax=ax, layout=self.plot_layout, width=720, height=720
+            fig=self.fig, ax=ax, layout=self.plot_layout, width=1080, height=1080
         )
 
         # Add the toolbar
         self.add_toolbar()
         self.add_forward_backward_action(self.plot_previous, self.plot_next)
 
-        # Add the fit action
+        # Add the selector
         self.add_rect_selector(self.ax[0], self.on_select, hint="Select Line")
+
+        # Add the fit button
+        # Get the actions
+        actions = self.toolbar.actions()
+
+        # Create the action
+        self.fit_button = QtGui.QAction("Simul. Fit", self)
+
+        # Connect the actions to the callback and add to toolbar
+        self.fit_button.triggered.connect(self.fit)
+        self.toolbar.insertAction(actions[-1], self.fit_button)
 
         # Plot the first step
         self.plot()
@@ -130,16 +150,26 @@ class EvalRot(MainWindow):
         x = x[mask]
         y = y[mask]
 
-        # Fit the data
-        self.fit = InteractiveFit(self, x, y, self.rot)
+        # Get parameter names
+        gamma = f"gamma{self.step}"
+        loc = f"loc{self.step}"
+        scale = f"scale{self.step}"
+        par_names = [gamma, loc, scale, "theta", "dx", "dy"]
 
-        if self.fit.exec():
-            # Get the fit parameters
-            rot = self.fit.m.values["theta"]
-            err = self.fit.m.errors["theta"]
-            
-            self.scan._rot[self.step] = rot
-            self.scan._err[self.step] = err
+        # Add the starting values limits
+        self.start_values[gamma] = 0.1 * (xr[1] - xr[0])
+        self.limits[gamma] = (0.0001 * (xr[1] - xr[0]), 0.5 * (xr[1] - xr[0]))
+        self.start_values[loc] = 0.5 * (xr[0] + xr[1])
+        self.limits[loc] = xr
+        self.start_values[scale] = 0.001
+        self.limits[scale] = (0.0001, 0.1)
+
+        # Add the cost function
+        if self.cost is None:
+            self.cost = cost.UnbinnedNLL((x, y), pdf, name=par_names)
+
+        else:
+            self.cost += cost.UnbinnedNLL((x, y), pdf, name=par_names)
 
         # Clear the selector
         self.selector.clear()
@@ -147,103 +177,96 @@ class EvalRot(MainWindow):
         # Plot the next step
         self.plot_next()
 
+    def fit(self):
+        # Get the parameter names
+        par_names = [par for par in self.start_values]
 
-class InteractiveFit(QtWidgets.QDialog):
+        # Create the Minuit object
+        m = Minuit(self.cost, **self.start_values)
 
-    def __init__(self,
-        parent: QtWidgets.QWidget,
-        x: NDArray,
-        y: NDArray,
-        start: float,
-    ) -> None:
-        # Initialize fit data
-        self.x = x
-        self.y = y
+        # Set the limits
+        for par in self.limits:
+            m.limits[par] = self.limits[par]
 
-        # Get the x and y limits
-        self.xlim = (x.min(), x.max())
+        # Fix all parameters except the angle
+        m.fixed[par_names] = True
+        m.fixed["theta"] = False
 
-        # Prepare starting values
-        dx = self.xlim[1] - self.xlim[0]
+        # Get the indices of the added steps
+        steps = [par[5:] for par in par_names if par.startswith("gamma")]
 
-        loc = 0.5 * (self.xlim[0] + self.xlim[1])
-        gamma = 0.1 * dx
-        theta = start
+        # Fit the lines individually
+        for step in steps:
+            # Set the parameters for the current step
+            m.fixed[f"gamma{step}"] = False
+            m.fixed[f"loc{step}"] = False
+            m.fixed[f"scale{step}"] = False
 
-        # Initialize the parent class
-        super().__init__(parent)
-        self.setWindowTitle("Photon Spectrum Fit")
-        self.resize(1280, 720)
-        font = QtGui.QFont()
-        font.setPointSize(11)
-        self.setFont(font)
+            # Continue the minimization
+            m.migrad()
 
-        self.layout = QtWidgets.QVBoxLayout(self)
+            # Fix the parameters for the current step
+            m.fixed[f"gamma{step}"] = True
+            m.fixed[f"loc{step}"] = True
+            m.fixed[f"scale{step}"] = True
 
-        def pdf(xy, gamma, loc, scale, theta):
-            x, y = xy - 0.5
-            cos_theta = np.cos(-theta * np.pi / 180)
-            sin_theta = np.sin(-theta * np.pi / 180)
-            x = cos_theta * x - sin_theta * y
+        # Let all parameters float except the offset
+        m.fixed[par_names] = False
+        m.fixed["dx"] = True
+        m.fixed["dy"] = True
 
-            return voigt.pdf(x + 0.5, gamma, loc, scale)
+        # Continue the minimization
+        m.migrad()
 
-        # Create the cost function
-        c = cost.UnbinnedNLL((x, y), pdf)
+        # Also let the offset float
+        m.fixed[par_names] = False
 
-        # Create the minimizer
-        self.m = Minuit(c, gamma=gamma, loc=loc, scale=0.001, theta=theta)
-        self.m.limits["gamma"] = (0.0001 * dx, 0.5 * dx)
-        self.m.limits["loc"] = (self.xlim[0], self.xlim[1])
-        self.m.limits["scale"] = (0.0001, 0.1)
-        self.m.limits["theta"] = (-180, 180)
+        # Finish the minimization
+        m.migrad()
 
-        def plot(args):
-            # Rotate the data
-            x, y = self.x - 0.5, self.y - 0.5
-            cos_theta = np.cos(-args[3] * np.pi / 180)
-            sin_theta = np.sin(-args[3] * np.pi / 180)
-            x = cos_theta * x - sin_theta * y
+        # Check if the fit converged
+        if not m.valid:
+            msg_box = QtWidgets.QMessageBox(self)
+            msg_box.setWindowTitle("Fit Error")
+            msg_box.setText("Fit did not converge.")
+            msg_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            msg_box.exec()
+            return
 
-            # Histogram the data
-            hist, edges = np.histogram(
-                x + 0.5, bins=512, range=(0, 1), density=True
-            )
+        # Get the fit results
+        self.scan._angle = np.array([
+            np.degrees(m.values["theta"]), np.degrees(m.errors["theta"])
+        ])
 
-            # Get the bin centers
-            centers = 0.5 * (edges[:-1] + edges[1:])
+        self.scan._offset = np.array([
+            [m.values["dx"], m.errors["dx"]], [m.values["dy"], m.errors["dy"]]
+        ])
 
-            # Plot the histogram
-            plt.errorbar(centers, hist, yerr=np.sqrt(hist), fmt="o", color="b")
-
-            # Plot the fit
-            _x = np.linspace(0, 1, 1024)
-            plt.plot(_x, voigt.pdf(_x, *args[:-1]), color="k")
-
-            plt.xlim(self.xlim)
-
-        # Update the fit widget
-        self.fit_widget = make_widget(self.m, plot, {}, False, False)
-
-        # Perform fit
-        self.fit_widget.fit_button.click()
-
-        # Add the fit widget to the layout
-        self.layout.addWidget(self.fit_widget)
-
-        # Create button box
-        fix_policy = QtWidgets.QSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Fixed
+        # Create a message box to display the results
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle("Fit Results")
+        msg_box.setText(
+            f"Fit Results:\n\n"
+            f"Angle: {self.scan._angle[0]:.2f} ± {self.scan._angle[1]:.2f} degrees\n"
+            f"Offset X: {self.scan._offset[0, 0]:.4f} ± {self.scan._offset[0, 1]:.4f}\n"
+            f"Offset Y: {self.scan._offset[1, 0]:.4f} ± {self.scan._offset[1, 1]:.4f}"
         )
-        self.button_box = QtWidgets.QWidget()
-        self.button_layout = QtWidgets.QHBoxLayout(self.button_box)
-        self.button_layout.addStretch()
-        self.buttons = QtWidgets.QDialogButtonBox(parent=self)
-        self.buttons.setOrientation(QtCore.Qt.Orientation.Horizontal)
-        self.buttons.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Cancel|QtWidgets.QDialogButtonBox.StandardButton.Ok)
-        self.buttons.accepted.connect(self.accept)  # type: ignore
-        self.buttons.rejected.connect(self.reject)  # type: ignore
-        self.buttons.setSizePolicy(fix_policy)
-        self.button_layout.addWidget(self.buttons)
-        self.layout.addWidget(self.button_box)
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        msg_box.exec()
+
+
+def pdf(xy, *args):
+    # Shift the x and y values to origin
+    x, y = xy - 0.5
+
+    # Allow the fit to find a better shift (dx, dy)
+    x = x + args[4]
+    y = y + args[5]
+
+    # Rotate the x and y values
+    cos_theta = np.cos(-args[3])
+    sin_theta = np.sin(-args[3])
+    x = cos_theta * x - sin_theta * y
+
+    # Evaluate Voigt at the new x values
+    return voigt.pdf(x + 0.5, *args[:3])
