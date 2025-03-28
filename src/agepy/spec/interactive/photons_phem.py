@@ -191,8 +191,11 @@ class AssignPhem(SpectrumViewer):
             self.ax.clear()
 
             # Set the title
-            title = f"{phex_dict}"[1:-1].replace("'", "").replace(":", " =")
-            self.ax.set_title(title)
+            title = ""
+            for key, val in phex_dict.items():
+                title += f"{key} = {val}, "
+
+            self.ax.set_title(title[:-2])
 
             # Plot the spectrum
             self.ax.stairs(self.y, self.edges, color=ageplot.colors[1])
@@ -295,7 +298,7 @@ class AssignPhem(SpectrumViewer):
             start_values = {}
 
             # Set the default signal model
-            sig1_model = "Gaussian"
+            sig1_model = "Voigt"
             sig2_model = "None"
 
             # Add the phex assignment
@@ -330,7 +333,7 @@ class AssignPhem(SpectrumViewer):
             phem2 = dialog.get_input()
 
             # Set the default signal model
-            sig2_model = "Gaussian"
+            sig2_model = "Voigt"
 
             # Add the phex assignment
             phem2 = {**phem2, **phex_dict}
@@ -653,6 +656,11 @@ class InteractiveFit(QtWidgets.QDialog):
                 return sig1.cdf(x, args[:idx1]) + sig2.cdf(x, args[idx1:idx2]) \
                     + bkg.cdf(x, args[idx2:])
 
+        # Shift the loc parameters if there are two signal components
+        if self.sig2 is not None:
+            self.params["loc1"] = 0.4 * (self.xr[1] - self.xr[0]) + self.xr[0]
+            self.params["loc2"] = 0.6 * (self.xr[1] - self.xr[0]) + self.xr[0]
+
         # Overwrite with given starting values
         for par, val in self.start_values.items():
             if par in self.params:
@@ -808,7 +816,7 @@ class Voigt(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "gamma": (0.0001 * dx, 0.5 * dx),
+            "s": (0, n_max), "gamma": (0.00001 * dx, 0.1 * dx),
             "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
         }
 
@@ -816,7 +824,7 @@ class Voigt(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": n, "gamma": 0.1 * dx, "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "s": n, "gamma": 0.01 * dx, "loc": 0.5 * (self.xr[0] + self.xr[1]),
             "scale": 0.05 * (self.xr[1] - self.xr[0])
         }
 

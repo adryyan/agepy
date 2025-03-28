@@ -1621,6 +1621,67 @@ class EnergyScan(Scan):
 
         return mask
 
+    def select_by_phex(self,
+        phex: Dict[str, Union[str, int]],
+        n_std: int = 1,
+        ignore_overlap: bool = False,
+    ) -> Tuple[int, NDArray]:
+        # Find the phex assignment
+        df = self._phex_assignments.copy()
+        for key, value in phex.items():
+            df.query(f"{key} == @value", inplace=True)
+
+            # Check if there are matching assignments
+            if df.empty:
+                raise ValueError("Phex assignment not found.")
+
+        # At this point there should be only one assignment
+        assert len(df) == 1, "Multiple or no assignments found."
+
+        # Get the fit results
+        fit_val = df["val"].iloc[0]
+        fit_err = df["err"].iloc[0]
+
+        # Select energy steps within n_std standard deviations of the mean
+        step_idx = np.argwhere(
+            np.abs(self.steps - fit_val[1]) < fit_val[2] * n_std
+        ).flatten()
+
+        # Check if steps were found
+        if len(step_idx) == 0 or ignore_overlap:
+            return df.index[0], step_idx
+
+        # Define energy range
+        e_range = (
+            fit_val[1] - fit_val[2] * n_std, fit_val[1] + fit_val[2] * n_std
+        )
+
+        # Check if multiple phex assignments overlap
+        overlap = self._phex_assignments.query(
+            "E > @e_range[0] and E < @e_range[1]"
+        )
+
+        for i, row in overlap.iterrows():
+            if i == df.index[0]:
+                continue
+
+            overlap_val = row["val"]
+            overlap_idx = np.argwhere(
+                np.abs(self.steps - overlap_val[1]) < overlap_val[2]
+            ).flatten()
+
+            # Remove the overlapping steps
+            overlap_idx = np.setdiff1d(step_idx, overlap_idx)
+
+            # Check if steps remain
+            if len(overlap_idx) == 0:
+                warnings.warn("No steps found without overlap.")
+
+            else:
+                step_idx = overlap_idx
+
+        return df.index[0], step_idx
+
     def assign_phex(self,
         reference: pd.DataFrame,
         label: Dict[str, Union[Sequence[str], int]],
@@ -2023,58 +2084,25 @@ class EnergyScan(Scan):
 
         """
         # Find the phex assignment
-        df = self._phex_assignments.copy()
-        for key, value in phex.items():
-            df.query(f"{key} == @value", inplace=True)
+        phex_idx, step_idx = self.select_by_phex(phex, n_std)
 
-            # Check if there are matching assignments
-            if df.empty:
-                raise ValueError("Phex assignment not found.")
+        if len(step_idx) == 0:
+            warnings.warn("Trying with 2 * n_std.")
+            phex_idx, step_idx = self.select_by_phex(phex, 2 * n_std)
 
-        # At this point there should be only one assignment
-        assert len(df) == 1, "Multiple or no assignments found."
+        if len(step_idx) == 0:
+            warnings.warn("Ignore overlapping assignments.")
+            phex_idx, step_idx = self.select_by_phex(
+                phex, n_std, ignore_overlap=True
+            )
+
+        if len(step_idx) == 0:
+            warnings.warn("No steps found for the given photon excitation.")
+            return np.zeros(len(edges) - 1), np.zeros(len(edges) - 1)
 
         # Get the fit results
-        fit_val = df["val"].iloc[0]
-        fit_err = df["err"].iloc[0]
-
-        # Select energy steps within n_std standard deviations of the mean
-        step_idx = np.argwhere(
-            np.abs(self.steps - fit_val[1]) < fit_val[2] * n_std
-        ).flatten()
-
-        # Check if steps were found
-        if len(step_idx) == 0:
-            raise ValueError("No steps found.")
-
-        # Define energy range
-        e_range = (
-            fit_val[1] - fit_val[2] * n_std, fit_val[1] + fit_val[2] * n_std
-        )
-
-        # Check if multiple phex assignments overlap
-        overlap = self._phex_assignments.query(
-            "E > @e_range[0] and E < @e_range[1]"
-        )
-
-        for i, row in overlap.iterrows():
-            if i == df.index[0]:
-                continue
-
-            overlap_val = row["val"]
-            overlap_idx = np.argwhere(
-                np.abs(self.steps - overlap_val[1]) < overlap_val[2]
-            ).flatten()
-
-            # Remove the overlapping steps
-            overlap_idx = np.setdiff1d(step_idx, overlap_idx)
-
-            # Check if steps remain
-            if len(overlap_idx) == 0:
-                warnings.warn("No steps found without overlap.")
-
-            else:
-                step_idx = overlap_idx
+        fit_val = self._phex_assignments.loc[phex_idx, "val"]
+        fit_err = self._phex_assignments.loc[phex_idx, "err"]
 
         # Initialize arrays for the summed spectrum
         spectrum = np.zeros(len(edges) - 1)
