@@ -223,8 +223,8 @@ class AssignPhex(MainWindow):
         yerr = self.yerr[in_range]
 
         # Define starting values for the fit
-        val_start1 = None
-        val_start2 = None
+        val_start1 = {}
+        val_start2 = {}
 
         # Get the assignments
         dialog = AssignmentDialog(self, self.label, title="Assign Peak I")

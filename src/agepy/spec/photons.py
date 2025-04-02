@@ -909,25 +909,38 @@ class BaseScan:
             step_val = []
 
             for i, step in enumerate(raw.keys()):
+                # Format the normalization values
+                step_norm = {}
+
+                try:
+                    for key, value in norm.items():
+                        if isinstance(value, np.ndarray):
+                            step_norm[key] = value[i]
+
+                        else:
+                            values = np.asarray(value[step])
+                            step_norm[key] = np.array(
+                                [np.mean(values), np.std(values)]
+                            )
+
+                except:
+                    print("Skipping step due to missing normalization values.")
+                    continue
+
                 # Format the step value
                 if scan_var is not None:
-                    step_val.append(steps[step][0][0])
+                    try:
+                        step_val.append(steps[step][0][0])
+
+                    except:
+                        print("Step value not found. Falling back to index.")
+                        step_val.append(float(step))
 
                 else:
                     step_val.append(float(step))
 
                 # Format the raw data
                 data = np.asarray(raw[step])
-
-                # Format the normalization values
-                step_norm = {}
-                for key, value in norm.items():
-                    if isinstance(value, np.ndarray):
-                        step_norm[key] = value[i]
-
-                    else:
-                        values = np.asarray(value[step])
-                        step_norm[key] = np.array([np.mean(values), np.std(values)])
 
                 # Initialize the spectrum instance
                 spectra.append(
@@ -2318,7 +2331,7 @@ class QEffScan(Scan):
         err[x > px[-1]] = 0
         return eff, err
 
-    def interactive(self, bins: int = 512, mc_samples=10000) -> int:
+    def interactive(self, bins: int = 512, sig="Voigt", bkg="None") -> int:
         """Plot the spectra in an interactive window.
 
         """
@@ -2332,7 +2345,7 @@ class QEffScan(Scan):
         app = get_qapp()
 
         # Intialize the viewer
-        mw = EvalQEff(self, edges, mc_samples)
+        mw = EvalQEff(self, edges, sig, bkg)
         mw.show()
 
         # Run the application

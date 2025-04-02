@@ -8,15 +8,7 @@ try:
     qt_binding = "PySide6"
 
 except ImportError:
-    warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
-
-    try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
-
-        qt_binding = "PyQt6"
-
-    except ImportError:
-        raise ImportError("No compatible Qt bindings found.")
+    raise ImportError("PySide6 required for interactive fitting.")
 
 # Import the modules for the fitting
 try:
@@ -61,7 +53,12 @@ class EvalQEff(SpectrumViewer):
 
     """
 
-    def __init__(self, scan: Scan, edges: np.ndarray, mc_samples: int) -> None:
+    def __init__(self,
+        scan: Scan,
+        edges: np.ndarray,
+        sig: str,
+        bkg: str,
+    ) -> None:
         # Set up the main window
         super().__init__(scan, edges)
 
@@ -83,8 +80,9 @@ class EvalQEff(SpectrumViewer):
         self.actions[3].setChecked(True)
         self.actions[3].setEnabled(False)
 
-        # Set the number of Monte Carlo samples
-        self.mc_samples = mc_samples
+        # Set the default signal and background models
+        self.default_sig = sig
+        self.default_bkg = bkg
 
         # Plot the first step
         self.plot()
@@ -101,8 +99,10 @@ class EvalQEff(SpectrumViewer):
 
         # Fit the data
         n = np.stack((y, yerr**2), axis=-1)
-        debug_fit = InteractiveFit(self, n, x, sig="Voigt", bkg="Constant")
-        
+        debug_fit = InteractiveFit(
+            self, n, x, sig=self.default_sig, bkg=self.default_bkg
+        )
+
         if debug_fit.exec():
             m = debug_fit.m
 
