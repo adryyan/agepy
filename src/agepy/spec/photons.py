@@ -2044,7 +2044,7 @@ class EnergyScan(Scan):
         edges: np.ndarray,
         n_std: float = 1.0,
         normalize: bool = False,
-        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
+        roi: Tuple[Tuple[float, float], Tuple[float, float]] = True,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
