@@ -89,7 +89,8 @@ def _mc_calibrated_spectrum(output, data, edges, calib, rng, n):
     for i in prange(n):
         # Select data points based on Poisson sampling
         p = rng.poisson(lam=data_counts, size=1)[0]
-        data_sample = rng.choice(data, size=p)
+        poisson_inds = rng.integers(0, data_counts, size=p)
+        data_sample = data[poisson_inds]
         # Convert x values to wavelengths
         a0_sample = rng.normal(calib[0][0], calib[0][1], size=1)[0]
         a1_sample = rng.normal(calib[1][0], calib[1][1], size=1)[0]
