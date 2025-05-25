@@ -4,3 +4,4 @@ dist/
 docs/_reference/
 docs/_build/
 build/
+uv.lock
