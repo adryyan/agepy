@@ -1,6 +1,5 @@
-"""Processing and analysis of fluorescence spectra.
+"""Processing and analysis of fluorescence spectra."""
 
-"""
 from __future__ import annotations
 import warnings
 import os
@@ -18,21 +17,44 @@ import matplotlib.pyplot as plt
 import h5py
 
 # Import internal modules
-from ._anodes import *
+from ._anodes import (
+    available_anodes,
+    PocoAnode,
+    WsaAnode,
+    DldAnodeXY,
+    DldAnodeUVW,
+    DldAnodeUV,
+    DldAnodeUW,
+    DldAnodeVW,
+    Old_WsaAnode,
+    Old_DldAnode,
+)
 
 # Import modules for type hinting
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from typing import Union, Tuple, Sequence, Dict, Literal
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
-    from iminuit import Minuit
     from numpy.typing import ArrayLike, NDArray
+    from ._anodes import PositionAnode
 
 __all__ = [
-    "QEffScan", "Spectrum", "Scan", "EnergyScan", "available_anodes",
-    "PocoAnode", "WsaAnode", "DldAnodeXY", "DldAnodeUVW", "DldAnodeUV",
-    "DldAnodeUW", "DldAnodeVW", "Old_WsaAnode", "Old_DldAnode"
+    "QEffScan",
+    "Spectrum",
+    "Scan",
+    "EnergyScan",
+    "available_anodes",
+    "PocoAnode",
+    "WsaAnode",
+    "DldAnodeXY",
+    "DldAnodeUVW",
+    "DldAnodeUV",
+    "DldAnodeUW",
+    "DldAnodeVW",
+    "Old_WsaAnode",
+    "Old_DldAnode",
 ]
 
 
@@ -45,15 +67,15 @@ def compute_bin(x, bin_edges):
 
     # special case to mirror NumPy behavior for last bin
     if x == a_max:
-        return n - 1 # a_max always in last bin
+        return n - 1  # a_max always in last bin
 
-    bin = int(n * (x - a_min) / (a_max - a_min))
+    bin_idx = int(n * (x - a_min) / (a_max - a_min))
 
-    if bin < 0 or bin >= n:
+    if bin_idx < 0 or bin_idx >= n:
         return None
 
     else:
-        return bin
+        return bin_idx
 
 
 @njit()
@@ -61,9 +83,9 @@ def numba_histogram(data, bin_edges):
     hist = np.zeros((bin_edges.shape[0] - 1,), dtype=np.float64)
 
     for x in data.flat:
-        bin = compute_bin(x, bin_edges)
-        if bin is not None:
-            hist[int(bin)] += 1
+        bin_idx = compute_bin(x, bin_edges)
+        if bin_idx is not None:
+            hist[int(bin_idx)] += 1
 
     return hist
 
@@ -73,9 +95,9 @@ def numba_weighted_histogram(data, bin_edges, weights):
     hist = np.zeros((bin_edges.shape[0] - 1,), dtype=np.float64)
 
     for x, w in zip(data.flat, weights.flat):
-        bin = compute_bin(x, bin_edges)
+        bin_idx = compute_bin(x, bin_edges)
         if bin is not None:
-            hist[int(bin)] += w
+            hist[int(bin_idx)] += w
 
     return hist
 
@@ -103,7 +125,9 @@ def _mc_calibrated_spectrum(output, data, edges, calib, rng, n):
 
 
 @njit(parallel=True)
-def _mc_calibrated_spectrum_with_qeff(output, data, edges, qeff, calib, rng, n):
+def _mc_calibrated_spectrum_with_qeff(
+    output, data, edges, qeff, calib, rng, n
+):
     # Prepare the quantum efficiency correction
     n_eff = len(qeff[0])
     # Define the interpolation grid for the efficiencies
@@ -179,7 +203,9 @@ def _mc_calibrated_spectrum_with_bkg(output, data, edges, bkg, calib, rng, n):
 
 
 @njit(parallel=True)
-def _mc_calibrated_spectrum_with_bkg_qeff(output, data, edges, bkg, qeff, calib, rng, n):
+def _mc_calibrated_spectrum_with_bkg_qeff(
+    output, data, edges, bkg, qeff, calib, rng, n
+):
     # Prepare the quantum efficiency correction
     n_eff = len(qeff[0])
     # Define the interpolation grid for the efficiencies
@@ -231,11 +257,10 @@ def _mc_calibrated_spectrum_with_bkg_qeff(output, data, edges, bkg, qeff, calib,
 
 
 class Spectrum:
-    """Fluorescence spectrum.
+    """Fluorescence spectrum."""
 
-    """
-
-    def __init__(self,
+    def __init__(
+        self,
         xy: np.ndarray,
         time: int = None,
         **norm,
@@ -267,7 +292,8 @@ class Spectrum:
             setattr(self, key, value)
 
     @classmethod
-    def from_h5(cls,
+    def from_h5(
+        cls,
         file_path: str,
         anode: PositionAnode,
         raw: str = "dld_rd#raw",
@@ -311,7 +337,9 @@ class Spectrum:
 
                 else:
                     values = np.asarray(h5[h5path + "/0/0.0"])
-                    norm[key] = np.array([np.mean(values), np.std(values)]).flatten()
+                    norm[key] = np.array(
+                        [np.mean(values), np.std(values)]
+                    ).flatten()
 
         # Initialize the Spectrum
         return cls(anode.process(raw), time=time, **norm)
@@ -325,9 +353,10 @@ class Spectrum:
             The x and y values of the photon hits.
 
         """
-        return self._xy[:,0], self._xy[:,1]
+        return self._xy[:, 0], self._xy[:, 1]
 
-    def det_image(self,
+    def det_image(
+        self,
         bins: Union[ArrayLike, Tuple[ArrayLike, ArrayLike]] = None,
         x_lim: Tuple[float, float] = (0, 1),
         y_lim: Tuple[float, float] = (0, 1),
@@ -356,8 +385,12 @@ class Spectrum:
 
             # grid with columns=2, row=2
             gs = gridspec.GridSpec(
-                2, 2, width_ratios=[3, 1], height_ratios=[1, 3],
-                wspace=0.05, hspace=0.05
+                2,
+                2,
+                width_ratios=[3, 1],
+                height_ratios=[1, 3],
+                wspace=0.05,
+                hspace=0.05,
             )
 
             # 2d detector image is subplot 2: lower left
@@ -375,8 +408,8 @@ class Spectrum:
             ax_cb_inset = ax_cb.inset_axes([0.0, 0.0, 0.25, 1.0])
 
             # Remove x and y tick labels
-            ax_x.tick_params(axis='both', labelbottom=False)
-            ax_y.tick_params(axis='both', labelleft=False)
+            ax_x.tick_params(axis="both", labelbottom=False)
+            ax_y.tick_params(axis="both", labelleft=False)
 
             # Remove grid from the detector image and colorbar
             ax_det.grid(False)
@@ -391,8 +424,8 @@ class Spectrum:
                 ax_y.clear()
                 ax_cb_inset.clear()
 
-            except:
-                raise ValueError("Invalid axes sequence provided.")
+            except Exception as e:
+                raise ValueError("Invalid axes sequence provided.") from e
 
         # Get the data
         x, y = self.xy()
@@ -452,7 +485,8 @@ class Spectrum:
 
         return fig, (ax_det, ax_x, ax_y, ax_cb_inset)
 
-    def counts(self,
+    def counts(
+        self,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
         bkg: Union[Spectrum, float] = None,
@@ -487,10 +521,10 @@ class Spectrum:
         # Use the full detector if roi not provided
         if roi is not None:
             # Apply y roi filter
-            data = data[data[:,1] > roi[1][0]]
-            data = data[data[:,1] < roi[1][1]]
+            data = data[data[:, 1] > roi[1][0]]
+            data = data[data[:, 1] < roi[1][1]]
             # Discard y values
-            data = data[:,0].flatten()
+            data = data[:, 0].flatten()
             # Apply x roi filter
             data = data[data > roi[0][0]]
             data = data[data < roi[0][1]]
@@ -532,19 +566,22 @@ class Spectrum:
 
         # Normalize data to account for beam intensity, gas
         # pressure, etc.
-        for norm in self._norm:
-            if isinstance(getattr(self, norm), np.ndarray):
-                val, err = getattr(self, norm)
-                error = np.sqrt(error**2 / val**2 + err**2 * counts**2 / val**4)
+        for normalize in self._norm:
+            if isinstance(getattr(self, normalize), np.ndarray):
+                val, err = getattr(self, normalize)
+                error = np.sqrt(
+                    error**2 / val**2 + err**2 * counts**2 / val**4
+                )
                 counts /= val
             else:
-                counts /= getattr(self, norm)
-                error /= getattr(self, norm)
+                counts /= getattr(self, normalize)
+                error /= getattr(self, normalize)
 
         # Return the counts and the uncertainty
         return counts, error
 
-    def spectrum(self,
+    def spectrum(
+        self,
         edges: np.ndarray,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray] = None,
@@ -594,7 +631,7 @@ class Spectrum:
         -------
         Tuple[np.ndarray, np.ndarray]
             The spectrum and its uncertainties.
-        
+
         """
         # Get x and y values of the photon hits
         data = np.copy(self._xy)
@@ -603,10 +640,10 @@ class Spectrum:
         if roi is None:
             roi = ((0, 1), (0, 1))
         # Apply y roi filter
-        data = data[data[:,1] > roi[1][0]]
-        data = data[data[:,1] < roi[1][1]]
+        data = data[data[:, 1] > roi[1][0]]
+        data = data[data[:, 1] < roi[1][1]]
         # Don't need y values anymore
-        data = data[:,0].flatten()
+        data = data[:, 0].flatten()
 
         # Prepare the background subtraction
         if isinstance(bkg, Spectrum):
@@ -614,16 +651,18 @@ class Spectrum:
             bkg_t = bkg._t
             # Test if background and data both have a time value
             if bkg_t is None or self._t is None:
-                raise ValueError("Both background and data must have a time value.")
+                raise ValueError(
+                    "Both background and data must have a time value."
+                )
 
             # Get the x and y values of the background spectrum
             bkg_data = bkg._xy
 
             # Apply y roi filter
-            bkg_data = bkg_data[bkg_data[:,1] > roi[1][0]]
-            bkg_data = bkg_data[bkg_data[:,1] < roi[1][1]]
+            bkg_data = bkg_data[bkg_data[:, 1] > roi[1][0]]
+            bkg_data = bkg_data[bkg_data[:, 1] < roi[1][1]]
             # Don't need y values anymore
-            bkg_data = bkg_data[:,0].flatten()
+            bkg_data = bkg_data[:, 0].flatten()
 
             # Prepare the background to be passed to the spectrum calculation
             bkg = (bkg_data, bkg_t)
@@ -637,9 +676,10 @@ class Spectrum:
             try:
                 calib_params = np.array(calib, dtype=np.float64)
                 assert calib_params.shape == (2, 2)
-            
-            except:
-                raise ValueError("Calibration parameters must be provided as ((a0, err), (a1, err)).")
+
+            except Exception as e:
+                errmsg = "calib must be provided as ((a0, err), (a1, err))."
+                raise ValueError(errmsg) from e
 
             # Adjust x roi filter to wavelength binning
             wl_min = calib_params[1][0] * roi[0][0] + calib_params[0][0]
@@ -651,7 +691,9 @@ class Spectrum:
             calib_params = np.array([[0, 0], [1, 0]])
 
             # Adjust x roi filter to binning
-            roi = np.argwhere((edges < roi[0][0]) | (edges > roi[0][1])).flatten()
+            roi = np.argwhere(
+                (edges < roi[0][0]) | (edges > roi[0][1])
+            ).flatten()
 
         # Prepare spatial detector efficiency correction
         if qeff is not None:
@@ -663,8 +705,9 @@ class Spectrum:
                 assert len(qeff_val) == len(qeff_err)
                 assert len(qeff_val) == len(qeff_x)
 
-            except:
-                raise ValueError("Detector efficiencies must be provided as (values, errors, x).")
+            except Exception as e:
+                errmsg = "qeff must be provided as (values, errors, x)."
+                raise ValueError(errmsg) from e
 
             qeff = (qeff_val, qeff_err, qeff_x)
 
@@ -682,16 +725,34 @@ class Spectrum:
 
             # Perform the Monte Carlo simulation
             if qeff is None and bkg is None:
-                spectrum = _mc_calibrated_spectrum(spectrum, data, edges, calib_params, rng, mc_samples)
+                spectrum = _mc_calibrated_spectrum(
+                    spectrum, data, edges, calib_params, rng, mc_samples
+                )
             elif qeff is None:
                 spectrum = _mc_calibrated_spectrum_with_bkg(
-                    spectrum, (data, self._t), edges, bkg, calib_params, rng, mc_samples)
+                    spectrum,
+                    (data, self._t),
+                    edges,
+                    bkg,
+                    calib_params,
+                    rng,
+                    mc_samples,
+                )
             elif bkg is None:
                 spectrum = _mc_calibrated_spectrum_with_qeff(
-                    spectrum, data, edges, qeff, calib_params, rng, mc_samples)
+                    spectrum, data, edges, qeff, calib_params, rng, mc_samples
+                )
             else:
                 spectrum = _mc_calibrated_spectrum_with_bkg_qeff(
-                    spectrum, (data, self._t), edges, bkg, qeff, calib_params, rng, mc_samples)
+                    spectrum,
+                    (data, self._t),
+                    edges,
+                    bkg,
+                    qeff,
+                    calib_params,
+                    rng,
+                    mc_samples,
+                )
 
             # Calculate mean and standard deviation of the sampled spectra
             errors = np.std(spectrum, ddof=1, axis=0)
@@ -719,13 +780,17 @@ class Spectrum:
 
                 # Calculate the uncertainties
                 nonzero = spectrum > 0
-                errors[nonzero] = weights[nonzero] * np.sqrt(2 / spectrum[nonzero])
+                errors[nonzero] = weights[nonzero] * np.sqrt(
+                    2 / spectrum[nonzero]
+                )
                 spectrum = weights
 
             if bkg is not None:
                 # Calibrate the background data
                 if calib is not None:
-                    bkg_data = calib_params[1][0] * bkg_data + calib_params[0][0]
+                    bkg_data = (
+                        calib_params[1][0] * bkg_data + calib_params[0][0]
+                    )
 
                 # Histogram the background data
                 if qeff is not None:
@@ -734,7 +799,9 @@ class Spectrum:
                     bkg_qeff = 1 / qeff[bkg_inds]
 
                     # Histogram the background data with the efficiencies
-                    bkg = np.histogram(bkg_data, bins=edges, weights=bkg_qeff)[0]
+                    bkg = np.histogram(bkg_data, bins=edges, weights=bkg_qeff)[
+                        0
+                    ]
 
                 else:
                     # Histogram the background data without the efficiencies
@@ -751,23 +818,26 @@ class Spectrum:
                 spectrum[spectrum < 0] = 0
 
         else:
-            raise ValueError("Error propagation method must be 'montecarlo' or 'none'.")
+            errmsg = "Error propagation method must be 'montecarlo' or 'none'."
+            raise ValueError(errmsg)
 
         # Normalize data to measurement duration per step
         if self._t is not None:
             spectrum /= self._t
             errors /= self._t
 
-        # Normalize data to account for beam intensity, gas 
+        # Normalize data to account for beam intensity, gas
         # pressure, etc.
-        for norm in self._norm:
-            if isinstance(getattr(self, norm), np.ndarray):
-                val, err = getattr(self, norm)
-                errors = np.sqrt(errors**2 / val**2 + err**2 * spectrum**2 / val**4)
+        for normalize in self._norm:
+            if isinstance(getattr(self, normalize), np.ndarray):
+                val, err = getattr(self, normalize)
+                errors = np.sqrt(
+                    errors**2 / val**2 + err**2 * spectrum**2 / val**4
+                )
                 spectrum /= val
             else:
-                spectrum /= getattr(self, norm)
-                errors /= getattr(self, norm)
+                spectrum /= getattr(self, normalize)
+                errors /= getattr(self, normalize)
 
         # Apply x roi filter
         spectrum[roi[:-1]] = 0
@@ -793,7 +863,7 @@ class Spectrum:
         val = getattr(self, norm)
 
         if isinstance(val, np.ndarray):
-            val, err = propagate(func, val[0], val[1]**2)
+            val, err = propagate(func, val[0], val[1] ** 2)
             setattr(self, norm, np.array([val, np.sqrt(err)]))
 
         else:
@@ -816,8 +886,8 @@ class Spectrum:
         try:
             from pint import UnitRegistry
 
-        except ImportError:
-            raise ImportError("pint is required to convert units.")
+        except ImportError as e:
+            raise ImportError("pint is required to convert units.") from e
 
         ureg = UnitRegistry()
         # Convert the normalization values
@@ -825,8 +895,8 @@ class Spectrum:
 
 
 class BaseScan:
-
-    def __init__(self,
+    def __init__(
+        self,
         data_files: Sequence[str],
         anode: PositionAnode,
         scan_var: str = None,
@@ -859,7 +929,9 @@ class BaseScan:
 
         # Load the spectra from the data files
         for f, t in zip(data_files, time_per_step):
-            spec, steps = self._load_spectra(f, scan_var, raw, anode, t, **norm)
+            spec, steps = self._load_spectra(
+                f, scan_var, raw, anode, t, **norm
+            )
             self._spectra.extend(spec)
             self._steps.extend(steps)
 
@@ -881,7 +953,8 @@ class BaseScan:
         # Initialize attributes
         self.roi = roi  # Region of interest for the detector
 
-    def _load_spectra(self,
+    def _load_spectra(
+        self,
         file_path: str,
         scan_var: str,
         raw: str,
@@ -924,7 +997,7 @@ class BaseScan:
                                 [np.mean(values), np.std(values)]
                             )
 
-                except:
+                except Exception:
                     print("Skipping step due to missing normalization values.")
                     continue
 
@@ -933,7 +1006,7 @@ class BaseScan:
                     try:
                         step_val.append(steps[step][0][0])
 
-                    except:
+                    except Exception:
                         print("Step value not found. Falling back to index.")
                         step_val.append(float(step))
 
@@ -945,7 +1018,9 @@ class BaseScan:
 
                 # Initialize the spectrum instance
                 spectra.append(
-                    Spectrum(anode.process(data), time=time_per_step, **step_norm)
+                    Spectrum(
+                        anode.process(data), time=time_per_step, **step_norm
+                    )
                 )
 
         # Return the spectra and energies
@@ -968,7 +1043,7 @@ class BaseScan:
         if isinstance(steps, np.ndarray):
             if steps.shape == (len(self.spectra),):
                 self._steps = steps
-            
+
             else:
                 raise ValueError(
                     "steps must be a 1D array of the same length as spectra."
@@ -981,7 +1056,7 @@ class BaseScan:
         return self._id
 
     @id.setter
-    def id(self, id: np.ndarray) -> None:
+    def id(self, measurement_id: np.ndarray) -> None:
         raise AttributeError("Attribute 'id' is read-only.")
 
     @property
@@ -989,10 +1064,13 @@ class BaseScan:
         return self._roi
 
     @roi.setter
-    def roi(self, roi: Tuple[Tuple[float, float], Tuple[float, float]]) -> None:
+    def roi(
+        self, roi: Tuple[Tuple[float, float], Tuple[float, float]]
+    ) -> None:
         self._roi = self.prepare_roi(roi)
 
-    def prepare_roi(self,
+    def prepare_roi(
+        self,
         roi: Tuple[Tuple[float, float], Tuple[float, float]],
     ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         if roi is None:
@@ -1010,32 +1088,35 @@ class BaseScan:
                 roi = np.array(roi, dtype=np.float64)
                 assert roi.shape == (2, 2)
 
-            except:
-                raise ValueError(
-                    "Region of interest must be provided as "
-                    "((xmin, xmax), (ymin, ymax))."
-                )
+            except Exception as e:
+                errmsg = "roi must be provided as ((xmin, xmax), (ymin, ymax))"
+                raise ValueError(errmsg) from e
 
             return roi
 
-    def select_step_range(self,
+    def select_step_range(
+        self,
         step_range: Tuple[float, float],
     ) -> Tuple[np.ndarray, np.ndarray]:
         if step_range is not None:
             try:
-                mask = (self.steps >= step_range[0]) & (self.steps <= step_range[1])
+                mask = (self.steps >= step_range[0]) & (
+                    self.steps <= step_range[1]
+                )
                 steps = self.steps[mask]
                 spectra = self.spectra[mask]
 
-            except:
-                raise ValueError("step_range must be a tuple of two floats.")
+            except Exception as e:
+                errmsg = "step_range must be (step_min, step_max)"
+                raise ValueError(errmsg) from e
 
             return spectra, steps
 
         else:
             return self.spectra, self.steps
 
-    def norm(self,
+    def norm(
+        self,
         norm: str,
         step_range: Tuple[float, float] = None,
     ) -> np.ndarray:
@@ -1107,14 +1188,19 @@ class BaseScan:
         try:
             from pint import UnitRegistry
 
-        except ImportError:
-            raise ImportError("pint is required to convert units.")
+        except ImportError as e:
+            errmsg = "pint is required to convert units"
+            raise ImportError(errmsg) from e
 
         ureg = UnitRegistry()
-        trafo = lambda x: ureg.Quantity(x, fro).m_as(to)
+
+        def trafo(x):
+            return ureg.Quantity(x, fro).m_as(to)
+
         self.transform_norm(norm, trafo)
 
-    def remove_steps(self,
+    def remove_steps(
+        self,
         measurement_number: str,
         steps: Union[Sequence[int], Sequence[float]],
     ) -> np.ndarray:
@@ -1183,7 +1269,6 @@ class BaseScan:
 
 
 class Scan(BaseScan):
-    
     """Scan over some variable with a spectrum for each step.
 
     Parameters
@@ -1205,7 +1290,7 @@ class Scan(BaseScan):
         `((xmin, xmax), (ymin, ymax))`. Default: None.
     **norm
         Normalization parameters as keyword arguments with the name as
-        key and the h5 path as the value. For example, 
+        key and the h5 path as the value. For example,
         `intensity_upstream = mirror#value`.
 
     Attributes
@@ -1230,7 +1315,8 @@ class Scan(BaseScan):
 
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         data_files: Sequence[str],
         anode: PositionAnode,
         scan_var: str = None,
@@ -1270,10 +1356,13 @@ class Scan(BaseScan):
         return self._calib
 
     @calib.setter
-    def calib(self, calib: Tuple[Tuple[float, float], Tuple[float, float]]) -> None:
+    def calib(
+        self, calib: Tuple[Tuple[float, float], Tuple[float, float]]
+    ) -> None:
         self._calib = self.prepare_calib(calib)
 
-    def prepare_qeff(self,
+    def prepare_qeff(
+        self,
         qeff: Tuple[np.ndarray, np.ndarray, np.ndarray],
     ) -> None:
         if qeff is None:
@@ -1304,12 +1393,14 @@ class Scan(BaseScan):
             assert np.all(x > 0)
             assert np.all(x < 1)
 
-        except:
-            raise ValueError("qeff could not be parsed.")
+        except Exception as e:
+            errmsg = "qeff could not be parsed"
+            raise ValueError(errmsg) from e
 
         return values, errors, x
 
-    def prepare_bkg(self,
+    def prepare_bkg(
+        self,
         bkg: Spectrum,
     ) -> Spectrum:
         if bkg is None:
@@ -1328,12 +1419,13 @@ class Scan(BaseScan):
         else:
             raise ValueError("bkg could not be parsed.")
 
-    def prepare_calib(self,
+    def prepare_calib(
+        self,
         calib: Tuple[Tuple[float, float], Tuple[float, float]],
     ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         if calib is None:
             return None
-        
+
         if isinstance(calib, bool):
             if calib:
                 return self.calib
@@ -1345,12 +1437,14 @@ class Scan(BaseScan):
             calib_params = np.array(calib, dtype=np.float64)
             assert calib_params.shape == (2, 2)
 
-        except:
-            raise ValueError("calib could not be parsed.")
+        except Exception as e:
+            errmsg = "calib could not be parsed"
+            raise ValueError(errmsg) from e
 
         return calib_params
 
-    def counts(self,
+    def counts(
+        self,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: bool = True,
         bkg: bool = True,
@@ -1396,7 +1490,8 @@ class Scan(BaseScan):
 
         return n, err, steps
 
-    def spectrum_at(self,
+    def spectrum_at(
+        self,
         idx: int,
         edges: np.ndarray,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
@@ -1450,11 +1545,17 @@ class Scan(BaseScan):
 
         # Calculate the spectrum at the specified index
         return self.spectra[idx].spectrum(
-            edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib, err_prop=err_prop,
-            mc_samples=mc_samples
+            edges,
+            roi=roi,
+            qeff=qeff,
+            bkg=bkg,
+            calib=calib,
+            err_prop=err_prop,
+            mc_samples=mc_samples,
         )
-    
-    def spectrum_at_step(self,
+
+    def spectrum_at_step(
+        self,
         step: Union[int, float],
         edges: np.ndarray,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
@@ -1505,14 +1606,18 @@ class Scan(BaseScan):
         idx = np.argmin(np.abs(self.steps - step))
 
         return self.spectrum_at(
-            idx, edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib,
-            err_prop=err_prop, mc_samples=mc_samples
+            idx,
+            edges,
+            roi=roi,
+            qeff=qeff,
+            bkg=bkg,
+            calib=calib,
+            err_prop=err_prop,
+            mc_samples=mc_samples,
         )
 
     def show_spectra(self):
-        """Plot the spectra in an interactive window.
-
-        """
+        """Plot the spectra in an interactive window."""
         from agepy.interactive import run
         from agepy.spec.interactive.photons_scan import SpectrumViewer
 
@@ -1557,7 +1662,8 @@ class EnergyScan(Scan):
 
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         data_files: Sequence[str],
         anode: PositionAnode,
         energy_uncertainty: Union[np.ndarray, float],
@@ -1613,7 +1719,8 @@ class EnergyScan(Scan):
         else:
             raise ValueError("Uncertainties must be a numpy array or a float.")
 
-    def remove_steps(self,
+    def remove_steps(
+        self,
         measurement_number: str,
         steps: Union[Sequence[int], Sequence[float]],
     ) -> np.ndarray:
@@ -1635,14 +1742,15 @@ class EnergyScan(Scan):
 
         return mask
 
-    def select_by_phex(self,
+    def select_by_phex(
+        self,
         phex: Dict[str, Union[str, int]],
         n_std: int = 1,
         ignore_overlap: bool = False,
     ) -> Tuple[int, NDArray]:
         # Find the phex assignment
         df = self._phex_assignments.copy()
-        for key, value in phex.items():
+        for key, value in phex.items():  # noqa B007
             df.query(f"{key} == @value", inplace=True)
 
             # Check if there are matching assignments
@@ -1654,7 +1762,6 @@ class EnergyScan(Scan):
 
         # Get the fit results
         fit_val = df["val"].iloc[0]
-        fit_err = df["err"].iloc[0]
 
         # Select energy steps within n_std standard deviations of the mean
         step_idx = np.argwhere(
@@ -1666,8 +1773,9 @@ class EnergyScan(Scan):
             return df.index[0], step_idx
 
         # Define energy range
-        e_range = (
-            fit_val[1] - fit_val[2] * n_std, fit_val[1] + fit_val[2] * n_std
+        e_range = (  # noqa F841
+            fit_val[1] - fit_val[2] * n_std,
+            fit_val[1] + fit_val[2] * n_std,
         )
 
         # Check if multiple phex assignments overlap
@@ -1689,14 +1797,16 @@ class EnergyScan(Scan):
 
             # Check if steps remain
             if len(overlap_idx) == 0:
-                warnings.warn("No steps found without overlap.")
+                wrnmsg = "No steps found without overlap"
+                warnings.warn(wrnmsg, stacklevel=1)
 
             else:
                 step_idx = overlap_idx
 
         return df.index[0], step_idx
 
-    def assign_phex(self,
+    def assign_phex(
+        self,
         reference: pd.DataFrame,
         label: Dict[str, Union[Sequence[str], int]],
         energy_range: float,
@@ -1722,7 +1832,8 @@ class EnergyScan(Scan):
         with open(path, "rb") as f:
             self._phex_assignments = pickle.load(f)
 
-    def eval_phex(self,
+    def eval_phex(
+        self,
         reference: pd.DataFrame,
         plot: bool = True,
         plot_pulls: bool = True,
@@ -1733,7 +1844,7 @@ class EnergyScan(Scan):
         labels = []
 
         # Find matching transitions
-        for i, row in self._phex_assignments.iterrows():
+        for row in self._phex_assignments.itertuples():
             ref = reference.copy()
 
             # Look for the excitation in the reference data
@@ -1783,11 +1894,14 @@ class EnergyScan(Scan):
             from iminuit import Minuit
             from iminuit.cost import LeastSquares
 
-        except ImportError:
-            raise ImportError("iminuit is required for fitting.")
+        except ImportError as e:
+            errmsg = "iminuit is required for fitting"
+            raise ImportError(errmsg) from e
 
         # Define the cost function
-        c = LeastSquares(ref_energies, fit_energies[:,0], fit_energies[:,1], model)
+        c = LeastSquares(
+            ref_energies, fit_energies[:, 0], fit_energies[:, 1], model
+        )
 
         # Initialize the minimizer with starting values
         m = Minuit(c, b1=1, b0=0)
@@ -1804,23 +1918,33 @@ class EnergyScan(Scan):
         inds = np.argwhere(pulls > 5).flatten()
         for idx in inds:
             print(
-                "Bad assignment of:", labels[idx], "with diff:",
-                c.prediction(m.values)[idx] - fit_energies[idx,0]
+                "Bad assignment of:",
+                labels[idx],
+                "with diff:",
+                c.prediction(m.values)[idx] - fit_energies[idx, 0],
             )
 
         # Plot the results
         if plot:
             # Create the figure
-            fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+            fig, ax = plt.subplots(
+                2, 1, sharex=True, gridspec_kw={"hspace": 0.3}
+            )
 
             # Plot the assignments
             ax[0].errorbar(
-                ref_energies, fit_energies[:,0], yerr=fit_energies[:,1],
-                fmt="s", markersize=1.5, label="Assign. Phex"
+                ref_energies,
+                fit_energies[:, 0],
+                yerr=fit_energies[:, 1],
+                fmt="s",
+                markersize=1.5,
+                label="Assign. Phex",
             )
 
             # Plot the fit results
-            ax[0].plot(ref_energies, c.prediction(m.values), label="Lin. Regr.")
+            ax[0].plot(
+                ref_energies, c.prediction(m.values), label="Lin. Regr."
+            )
 
             # Plot the legend with the chi2/ndof
             chi2ndof = m.fmin.reduced_chi2
@@ -1829,7 +1953,9 @@ class EnergyScan(Scan):
             )
 
             # Set title and labels
-            ax[0].set_title(r"Assigned Photon-Excitation Energies $E_\text{data}$")
+            ax[0].set_title(
+                r"Assigned Photon-Excitation Energies $E_\text{data}$"
+            )
             ax[0].set_ylabel(r"$E_\text{data}$ [eV]")
             ax[1].set_xlabel(r"$E_\text{literature}$ [eV]")
 
@@ -1840,12 +1966,18 @@ class EnergyScan(Scan):
                 ax[1].step(ref_energies, c.pulls(m.values), where="mid")
 
                 # Set title and label
-                ax[1].set_title("Studentized Residuals of the Linear Regression")
+                ax[1].set_title(
+                    "Studentized Residuals of the Linear Regression"
+                )
                 ax[1].set_ylabel("Pulls")
 
             else:
                 # Plot the differences of the fit to the data
-                ax[1].step(ref_energies, c.prediction(m.values) - fit_energies[:,0], where="mid")
+                ax[1].step(
+                    ref_energies,
+                    c.prediction(m.values) - fit_energies[:, 0],
+                    where="mid",
+                )
 
                 # Set title and label
                 ax[1].set_title("Difference to the Linear Regression")
@@ -1855,7 +1987,8 @@ class EnergyScan(Scan):
 
         return None, None
 
-    def assign_phem(self,
+    def assign_phem(
+        self,
         reference: pd.DataFrame,
         label: Dict[str, Union[Sequence[str], int]],
         calib_guess: Tuple[float, float],
@@ -1885,7 +2018,8 @@ class EnergyScan(Scan):
         with open(path, "rb") as f:
             self._phem_assignments = pickle.load(f)
 
-    def eval_phem(self,
+    def eval_phem(
+        self,
         reference: pd.DataFrame,
         calib_guess: Tuple[float, float],
         plot: bool = True,
@@ -1897,7 +2031,7 @@ class EnergyScan(Scan):
         labels = []
 
         # Find matching transitions
-        for i, row in self._phem_assignments.iterrows():
+        for row in self._phem_assignments.itertuples():
             ref = reference.copy()
 
             # Look for the transition in the reference data
@@ -1948,11 +2082,12 @@ class EnergyScan(Scan):
             from iminuit import Minuit
             from iminuit.cost import LeastSquares
 
-        except ImportError:
-            raise ImportError("iminuit is required for fitting.")
+        except ImportError as e:
+            errmsg = "iminuit is required for fitting"
+            raise ImportError(errmsg) from e
 
         # Define the cost function
-        c = LeastSquares(ref_wl, fit_wl[:,0], fit_wl[:,1], model)
+        c = LeastSquares(ref_wl, fit_wl[:, 0], fit_wl[:, 1], model)
 
         # Parse start values
         b1start = 1 / calib_guess[1]
@@ -1982,19 +2117,27 @@ class EnergyScan(Scan):
         inds = np.argwhere(pulls > 5).flatten()
         for idx in inds:
             print(
-                "Bad assignment of:", labels[idx], "with diff:",
-                c.prediction(m.values)[idx] - fit_wl[idx,0]
+                "Bad assignment of:",
+                labels[idx],
+                "with diff:",
+                c.prediction(m.values)[idx] - fit_wl[idx, 0],
             )
 
         # Plot the results
         if plot:
             # Create the figure
-            fig, ax = plt.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.3})
+            fig, ax = plt.subplots(
+                2, 1, sharex=True, gridspec_kw={"hspace": 0.3}
+            )
 
             # Plot the assignments
             ax[0].errorbar(
-                ref_wl, fit_wl[:,0], yerr=fit_wl[:,1],
-                fmt="s", markersize=1.5, label="Assign. Phem"
+                ref_wl,
+                fit_wl[:, 0],
+                yerr=fit_wl[:, 1],
+                fmt="s",
+                markersize=1.5,
+                label="Assign. Phem",
             )
 
             # Plot the fit results
@@ -2018,15 +2161,21 @@ class EnergyScan(Scan):
                 ax[1].step(ref_wl, c.pulls(m.values), where="mid")
 
                 # Set title and label
-                ax[1].set_title("Studentized Residuals of the Linear Regression")
+                ax[1].set_title(
+                    "Studentized Residuals of the Linear Regression"
+                )
                 ax[1].set_ylabel("Pulls")
             else:
                 # Plot the differences of the fit to the data
-                ax[1].step(ref_wl, c.prediction(m.values) - fit_wl[:,0], where="mid")
+                ax[1].step(
+                    ref_wl, c.prediction(m.values) - fit_wl[:, 0], where="mid"
+                )
 
                 # Set title and label
                 ax[1].set_title("Difference to the Linear Regression")
-                ax[1].set_ylabel(r"$(\text{Lin. Regr.} - x_\text{data})$ [arb. u.]")
+                ax[1].set_ylabel(
+                    r"$(\text{Lin. Regr.} - x_\text{data})$ [arb. u.]"
+                )
 
             return fig, ax
 
@@ -2040,7 +2189,8 @@ class EnergyScan(Scan):
         with open(path, "rb") as f:
             self.calib = pickle.load(f)
 
-    def assigned_spectrum(self,
+    def assigned_spectrum(
+        self,
         phex: Dict[str, Union[str, int]],
         edges: np.ndarray,
         n_std: float = 1.0,
@@ -2126,8 +2276,14 @@ class EnergyScan(Scan):
         for idx in step_idx:
             # Calculate the spectrum
             spec, err = self.spectrum_at(
-                idx, edges, roi=roi, qeff=qeff, bkg=bkg, calib=calib,
-                err_prop=err_prop, mc_samples=mc_samples
+                idx,
+                edges,
+                roi=roi,
+                qeff=qeff,
+                bkg=bkg,
+                calib=calib,
+                err_prop=err_prop,
+                mc_samples=mc_samples,
             )
 
             # Normalize with the excitation fit results
@@ -2139,14 +2295,14 @@ class EnergyScan(Scan):
                     return y / y_max
 
                 # Evaluate the excitation at the step value
-                exc, exc_err = propagate(calc_exc, fit_val[1:], fit_err[1:]**2)
+                exc, exc_err = propagate(
+                    calc_exc, fit_val[1:], fit_err[1:] ** 2
+                )
                 exc_err = np.sqrt(exc_err)
 
                 # Normalize the spectrum
                 spec /= exc
-                err = np.sqrt(
-                    err**2 / exc**2 + spec**2 * exc_err**2 / exc**4
-                )
+                err = np.sqrt(err**2 / exc**2 + spec**2 * exc_err**2 / exc**4)
 
             # Add the spectrum to the sum
             spectrum += spec
@@ -2163,7 +2319,8 @@ class EnergyScan(Scan):
         # Return the summed spectrum
         return spectrum, errors
 
-    def phexphem(self,
+    def phexphem(
+        self,
         xedges: np.ndarray = None,
         yedges: np.ndarray = None,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
@@ -2171,9 +2328,7 @@ class EnergyScan(Scan):
         bkg: bool = True,
         calib: bool = True,
     ) -> np.ndarray:
-        """
-        
-        """
+        """ """
         # Parse the given calculation options
         roi = self.prepare_roi(roi)
         qeff = self.prepare_qeff(qeff)
@@ -2244,7 +2399,8 @@ class QEffScan(Scan):
 
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         data_files: Sequence[str],
         anode: PositionAnode,
         raw: str = "dld_rd#raw",
@@ -2258,7 +2414,9 @@ class QEffScan(Scan):
             roi[0][1] = 1
 
         # Load and process data
-        super().__init__(data_files, anode, None, raw, time_per_step, roi, **norm)
+        super().__init__(
+            data_files, anode, None, raw, time_per_step, roi, **norm
+        )
 
         # Initialize the result arrays
         n = len(self.steps)
@@ -2295,12 +2453,13 @@ class QEffScan(Scan):
         inds = np.argsort(px)
 
         return py[inds] / ymax, pyerr[inds] / ymax, px[inds]
-    
+
     @qeff.setter
     def qeff(self, value) -> None:
         raise AttributeError("Quantum efficiency can not be set for QEffScan.")
 
-    def interpolate(self,
+    def interpolate(
+        self,
         x: np.ndarray,
         mc_samples: int = 10000,
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -2333,9 +2492,7 @@ class QEffScan(Scan):
         return eff, err
 
     def interactive(self, bins: int = 512, sig="Voigt", bkg="None") -> int:
-        """Plot the spectra in an interactive window.
-
-        """
+        """Plot the spectra in an interactive window."""
         from agepy.interactive import get_qapp
         from agepy.spec.interactive.photons_qeff import EvalQEff
 
@@ -2352,14 +2509,10 @@ class QEffScan(Scan):
         # Run the application
         return app.exec()
 
-    def plot(self,
-        ax: Axes = None,
-        color: str = "k",
-        label: str = None
+    def plot(
+        self, ax: Axes = None, color: str = "k", label: str = None
     ) -> Tuple[Figure, Axes]:
-        """Plot the calculated detector efficiencies.
-
-        """
+        """Plot the calculated detector efficiencies."""
         # Create the figure and axis
         if ax is None:
             fig, ax = plt.subplots()
@@ -2450,7 +2603,8 @@ class RotationScan(Scan):
 
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         data_files: Sequence[str],
         anode: PositionAnode,
         raw: str = "dld_rd#raw",
@@ -2477,7 +2631,7 @@ class RotationScan(Scan):
     @property
     def qeff(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         return None
-    
+
     @qeff.setter
     def qeff(self, value) -> None:
         raise AttributeError("Quantum efficiency can not be set for QEffScan.")
@@ -2491,9 +2645,7 @@ class RotationScan(Scan):
         return self._offset
 
     def interactive(self, angle: float, offset: Tuple[float, float]) -> int:
-        """Plot the spectra in an interactive window.
-
-        """
+        """Plot the spectra in an interactive window."""
         from agepy.interactive import get_qapp
         from agepy.spec.interactive.photons_rot import EvalRot
 
