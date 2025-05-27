@@ -1,19 +1,19 @@
-"""Processing and analysis of fluorescence spectra."""
+"""Load fluorescence spectra from scans."""
 
 from __future__ import annotations
 
+import os
 import pickle
 import numpy as np
 import h5py
 
 from .spectrum import Spectrum
 
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Union, Tuple, Literal, Sequence
-    from numpy.typing import ArrayLike, NDArray
+    from numpy.typing import NDArray
     from agepy.spec.photons.anodes import PositionAnode
 
     type RegionOfInterest = Tuple[Tuple[float, float], Tuple[float, float]]
@@ -223,7 +223,7 @@ class BaseScan:
     def select_step_range(
         self,
         step_range: Tuple[float, float],
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[NDArray, NDArray]:
         if step_range is not None:
             try:
                 mask = (self.steps >= step_range[0]) & (
@@ -245,7 +245,7 @@ class BaseScan:
         self,
         norm: str,
         step_range: Tuple[float, float] = None,
-    ) -> np.ndarray:
+    ) -> NDArray:
         """Get the normalization values (and their standard deviation)
         for the specified parameter.
 
@@ -259,7 +259,7 @@ class BaseScan:
 
         Returns
         -------
-        Tuple[np.ndarray, np.ndarray, np.ndarray]
+        Tuple[NDArray, NDArray, NDArray]
             The averaged normalization values, the respective standard
             deviation, and the corresponding step values.
 
@@ -329,7 +329,7 @@ class BaseScan:
         self,
         measurement_number: str,
         steps: Union[Sequence[int], Sequence[float]],
-    ) -> np.ndarray:
+    ) -> NDArray:
         """Remove the specified steps of a measurement from the scan.
 
         Parameters
@@ -423,15 +423,15 @@ class Scan(BaseScan):
     ----------
     anode: PositionAnode
         Anode object from `agepy.spec.photons`.
-    spectra: np.ndarray
+    spectra: NDArray
         Array of the loaded Spectrum objects.
-    steps: np.ndarray
+    steps: NDArray
         Array of the scan variable values.
-    id: np.ndarray
+    id: NDArray
         Array of the measurement numbers.
     roi: Tuple[Tuple[float, float], Tuple[float, float]]
         Region of interest for the detector.
-    qeff: Tuple[np.ndarray, np.ndarray, np.ndarray]
+    qeff: Tuple[NDArray, NDArray, NDArray]
         Detector efficiencies in the form `(values, errors, x)`.
     bkg: Spectrum
         Background spectrum (dark counts) to be subtracted.
@@ -462,11 +462,11 @@ class Scan(BaseScan):
         self._calib = None  # Wavelength calibration
 
     @property
-    def qeff(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def qeff(self) -> Tuple[NDArray, NDArray, NDArray]:
         return self._qeff
 
     @qeff.setter
-    def qeff(self, qeff: Tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
+    def qeff(self, qeff: Tuple[NDArray, NDArray, NDArray]) -> None:
         self._qeff = self.prepare_qeff(qeff)
 
     @property
@@ -489,7 +489,7 @@ class Scan(BaseScan):
 
     def prepare_qeff(
         self,
-        qeff: Tuple[np.ndarray, np.ndarray, np.ndarray],
+        qeff: Tuple[NDArray, NDArray, NDArray],
     ) -> None:
         if qeff is None:
             return None
@@ -500,6 +500,8 @@ class Scan(BaseScan):
 
             else:
                 return None
+
+        from .qeff import QEffScan
 
         if isinstance(qeff, QEffScan):
             return qeff.qeff
@@ -575,7 +577,7 @@ class Scan(BaseScan):
         qeff: bool = True,
         bkg: bool = True,
         step_range: Tuple[float, float] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[NDArray, NDArray, NDArray]:
         """Get the photon-excitation energy spectrum.
 
         Parameters
@@ -595,7 +597,7 @@ class Scan(BaseScan):
 
         Returns
         -------
-        Tuple[np.ndarray, np.ndarray, np.ndarray]
+        Tuple[NDArray, NDArray, NDArray]
             The number of counts (normalized), the respective
             uncertainties, and the corresponding step values.
 
@@ -619,21 +621,21 @@ class Scan(BaseScan):
     def spectrum_at(
         self,
         idx: int,
-        edges: np.ndarray,
+        edges: NDArray,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
         err_prop: Literal["montecarlo", "none"] = "montecarlo",
         mc_samples: int = 10000,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
         Parameters
         ----------
         idx: int
             Index of the step to get the spectrum for.
-        edges: np.ndarray
+        edges: NDArray
             Bin edges for the histogram. For a calibrated spectrum,
             these should be in wavelength units. For an uncalibrated
             spectrum, these should be between 0 and 1.
@@ -659,7 +661,7 @@ class Scan(BaseScan):
 
         Returns
         -------
-        Tuple[np.ndarray, np.ndarray]
+        Tuple[NDArray, NDArray]
             The spectrum and its uncertainties.
 
         """
@@ -683,14 +685,14 @@ class Scan(BaseScan):
     def spectrum_at_step(
         self,
         step: Union[int, float],
-        edges: np.ndarray,
+        edges: NDArray,
         roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
         err_prop: Literal["montecarlo", "none"] = "montecarlo",
         mc_samples: int = 10000,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
         Parameters
@@ -698,7 +700,7 @@ class Scan(BaseScan):
         step: Union[int, float]
             Step value to get the spectrum for. The closest step value
             is used.
-        edges: np.ndarray
+        edges: NDArray
             Bin edges for the histogram. For a calibrated spectrum,
             these should be in wavelength units. For an uncalibrated
             spectrum, these should be between 0 and 1.
@@ -724,7 +726,7 @@ class Scan(BaseScan):
 
         Returns
         -------
-        Tuple[np.ndarray, np.ndarray]
+        Tuple[NDArray, NDArray]
             The spectrum and its uncertainties.
 
         """
@@ -745,7 +747,7 @@ class Scan(BaseScan):
     def show_spectra(self):
         """Plot the spectra in an interactive window."""
         from agepy.interactive import run
-        from agepy.spec.interactive.photons_scan import SpectrumViewer
+        from ._interactive_scan import SpectrumViewer
 
         # Intialize the viewer
         mw = SpectrumViewer(self)
