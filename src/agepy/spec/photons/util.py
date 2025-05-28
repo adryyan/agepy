@@ -17,11 +17,11 @@ def parse_roi(roi: ArrayLike) -> NDArray:
         raise ValueError(errmsg)
 
     # Check if max is greater than min
-    if roi[0, 1] > roi[0, 0]:
+    if roi[0, 1] < roi[0, 0]:
         errmsg = "xmax must be larger than xmin."
         raise ValueError(errmsg)
 
-    if roi[1, 1] > roi[1, 0]:
+    if roi[1, 1] < roi[1, 0]:
         errmsg = "ymax must be larger than ymin."
         raise ValueError(errmsg)
 
@@ -65,7 +65,7 @@ def parse_qeff(
     val, err, x = val[inds], err[inds], x[inds]
 
     # Check if x values are in range (0, 1)
-    if x[0] < 0 or x[-1]:
+    if x[0] < 0 or x[-1] > 1:
         errmsg = "qeff x values must be in range (0, 1)."
         raise ValueError(errmsg)
 
