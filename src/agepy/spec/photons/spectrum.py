@@ -98,11 +98,11 @@ class Spectrum:
             # Check if the data is found
             if group_raw not in h5:
                 errmsg = f"{group_raw} not found."
-                raise ValueError(errmsg)
+                raise KeyError(errmsg)
 
             if step not in h5[group_raw]:
                 errmsg = f"{step} not found in {group_raw}"
-                raise ValueError(errmsg)
+                raise KeyError(errmsg)
 
             # Load the raw data
             group_raw = h5[group_raw]
@@ -114,7 +114,7 @@ class Spectrum:
 
                 if group_norm not in h5:
                     errmsg = f"{group_norm} not found."
-                    raise ValueError(errmsg)
+                    raise KeyError(errmsg)
 
                 # Load the dataset / group
                 data_norm = h5[group_norm]
@@ -133,7 +133,7 @@ class Spectrum:
 
                     else:
                         errmsg = f"Could not parse data in {group_norm}."
-                        raise ValueError(errmsg)
+                        raise RuntimeError(errmsg)
 
                 elif step in data_norm:
                     # Values recorded by metro every x seconds
@@ -144,7 +144,7 @@ class Spectrum:
 
                 else:
                     errmsg = f"{step} not found in {group_norm}."
-                    raise ValueError(errmsg)
+                    raise KeyError(errmsg)
 
         # Initialize the Spectrum
         return cls(anode.process(data_raw), time=time, **normalize)
@@ -442,11 +442,11 @@ class Spectrum:
 
         Returns
         -------
-        spec: np.ndarray, shape (N-1,)
+        spec: np.ndarray, shape (N,)
             The spectrum in the form of bin values.
-        err: np.ndarray, shape (N-1,)
+        err: np.ndarray, shape (N,)
             The respective uncertainties of the bin values.
-        edges: np.ndarray, shape (N,)
+        edges: np.ndarray, shape (N+1,)
             The bin edges from `numpy.histogram`.
 
         """
@@ -482,7 +482,7 @@ class Spectrum:
             # Test if background and data both have a time value
             if bkg._t is None or self._t is None:
                 errmsg = "Both background and data must have a time value."
-                raise ValueError(errmsg)
+                raise AttributeError(errmsg)
 
             # Get the x and y values of the background spectrum
             bkg_data = np.copy(bkg._xy)
@@ -629,7 +629,7 @@ class Spectrum:
         """
         if not hasattr(self, norm):
             errmsg = f"Unknown normalization {norm}"
-            raise ValueError(errmsg)
+            raise AttributeError(errmsg)
 
         # Get the current value and uncertainty
         val = getattr(self, norm)

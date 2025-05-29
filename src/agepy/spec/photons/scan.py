@@ -8,75 +8,81 @@ import numpy as np
 import h5py
 
 from .spectrum import Spectrum
+from .util import parse_roi, parse_qeff, parse_calib
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Union, Tuple, Literal, Sequence
-    from numpy.typing import NDArray
+    from typing import Literal
+    from numpy.typing import NDArray, ArrayLike
     from agepy.spec.photons.anodes import PositionAnode
-
-    type RegionOfInterest = Tuple[Tuple[float, float], Tuple[float, float]]
-    type QuantumEfficiency = Tuple[NDArray, NDArray, NDArray]
-    type WavelengthCalib = Tuple[Tuple[float, float], Tuple[float, float]]
-    type ErrorPropagation = Literal["montecarlo", "none"]
 
 
 class BaseScan:
     def __init__(
         self,
-        data_files: Sequence[str],
+        data_files: str | ArrayLike,
         anode: PositionAnode,
         scan_var: str | None = None,
         raw: str = "dld_rd#raw",
-        time_per_step: int | Sequence[int] | None = None,
-        roi: RegionOfInterest | None = None,
-        **norm: str,
+        time_per_step: int | ArrayLike | None = None,
+        roi: ArrayLike = ((0, 1), (0, 1)),
+        **normalize: str,
     ) -> None:
         # Intialize lists for the spectra and steps
         self._spectra = []
         self._steps = []
 
         # Keep track of the measurement number
-        self._id = []
+        self._m_id = []
 
         # Force data_files to be a list
         if isinstance(data_files, str):
             data_files = [data_files]
 
+        data_files = np.asarray(data_files, dtype=np.dtypes.StringDType())
+
         # Create a list of time_per_step values if only one is provided
         if isinstance(time_per_step, int):
             time_per_step = [time_per_step] * len(data_files)
 
-        # Check if the length of time_per_step matches the number of data files
-        if len(time_per_step) != len(data_files):
-            raise ValueError(
-                "time_per_step must be a single int or a list of the same "
-                "length as data_files."
-            )
+        if time_per_step is not None:
+            time_per_step = np.asarray(time_per_step, dtype=np.int64)
+
+            # Check if the length of time_per_step matches the number of
+            # data files
+            if len(time_per_step) != len(data_files):
+                errmsg = "time_per_step must have same length as data_files."
+                raise ValueError(errmsg)
+
+        else:
+            # Use 1s as the time per step
+            time_per_step = np.ones_like(data_files, dtype=np.int64)
 
         # Load the spectra from the data files
         for f, t in zip(data_files, time_per_step):
-            spec, steps = self._load_spectra(
-                f, scan_var, raw, anode, t, **norm
+            spectra, steps = self._load_spectra(
+                f, scan_var, raw, anode, t, **normalize
             )
-            self._spectra.extend(spec)
+
+            # Append the loaded spectra and steps
+            self._spectra.extend(spectra)
             self._steps.extend(steps)
 
             # Add the measurement number as the id
-            f = os.path.basename(f)[:3]
-            self._id.extend([f] * len(steps))
+            m_id = os.path.basename(f)[:3]
+            self._m_id.extend([m_id] * len(steps))
 
         # Convert to numpy arrays
-        self._steps = np.array(self._steps)
-        self._spectra = np.array(self._spectra)
-        self._id = np.array(self._id)
+        self._steps = np.asrray(self._steps, dtype=np.float64)
+        self._spectra = np.asarray(self._spectra, dtype=object)
+        self._m_id = np.asarray(self._m_id, dtype="<U3")
 
         # Sort the spectra by step values
-        _sort = np.argsort(self._steps)
-        self._steps = self._steps[_sort]
-        self._spectra = self._spectra[_sort]
-        self._id = self._id[_sort]
+        inds = np.argsort(self._steps)
+        self._steps = self._steps[inds]
+        self._spectra = self._spectra[inds]
+        self._id = self._id[inds]
 
         # Initialize attributes
         self.roi = roi  # Region of interest for the detector
@@ -84,72 +90,111 @@ class BaseScan:
     def _load_spectra(
         self,
         file_path: str,
-        scan_var: str,
+        scan_var: str | None,
         raw: str,
         anode: PositionAnode,
-        time_per_step: int,
-        **norm: str,
-    ) -> Tuple[list[Spectrum], list[float]]:
+        time_per_step: int | None,
+        **normalize: str,
+    ) -> tuple[list[Spectrum], list[float]]:
         with h5py.File(file_path, "r") as h5:
             # Load the steps
             if scan_var is not None:
-                steps = h5[scan_var + "/0"]
+                scan_var += "/0"
+
+                # Check if the step location is valid
+                if scan_var not in h5:
+                    errmsg = f"{scan_var} not found."
+                    raise KeyError(errmsg)
+
+                steps = h5[scan_var]
 
             # Load the raw data
-            raw = h5[raw + "/0"]
+            group_raw = raw + "/0"
+
+            # Check if the data location is valid
+            if group_raw not in h5:
+                errmsg = f"{group_raw} not found."
+
+            group_raw = h5[group_raw]
 
             # Load normalization values
-            for key, h5path in norm.items():
-                if h5path.endswith("avg"):
-                    norm[key] = np.asarray(h5[h5path + "/0"])
+            for name_norm, group_norm in normalize.items():
+                group_norm = group_norm + "/0"
+
+                if group_norm not in h5:
+                    errmsg = f"{group_norm} not found."
+                    raise KeyError(errmsg)
+
+                # Load the dataset / group
+                data_norm = h5[group_norm]
+
+                if isinstance(data_norm, h5py.Dataset):
+                    # Values averaged by metro
+                    normalize[name_norm] = np.asarray(
+                        data_norm, dtype=np.float64
+                    )
 
                 else:
-                    norm[key] = h5[h5path + "/0"]
+                    normalize[name_norm] = data_norm
 
             # Format the data and steps
             spectra = []
             step_val = []
 
-            for i, step in enumerate(raw.keys()):
+            for i, step in enumerate(group_raw.keys()):
                 # Format the normalization values
                 step_norm = {}
 
+                # Format the normalization values
                 try:
-                    for key, value in norm.items():
-                        if isinstance(value, np.ndarray):
-                            step_norm[key] = value[i]
+                    for name_norm, data_norm in normalize.items():
+                        if isinstance(data_norm, h5.Group):
+                            # Check if the step is present
+                            if step not in data_norm:
+                                raise KeyError()
+
+                            # Calculate the mean and std
+                            values = np.asarray(
+                                data_norm[step], dtype=np.float64
+                            )
+                            mean = np.mean(values)
+                            std = np.std(values, ddof=1, mean=mean)
+                            step_norm[name_norm] = np.asarray(
+                                [mean, std]
+                            ).flatten()
 
                         else:
-                            values = np.asarray(value[step])
-                            step_norm[key] = np.array(
-                                [np.mean(values), np.std(values)]
+                            # Load the metro averaged value
+                            step_norm[name_norm] = np.asarray(
+                                [data_norm[i], 0]
                             )
 
                 except Exception:
-                    print("Skipping step due to missing normalization values.")
+                    print(f"Skipping {step} due to missing normalization.")
                     continue
 
                 # Format the step value
+                step_val.append(float(step))
+
                 if scan_var is not None:
                     try:
-                        step_val.append(steps[step][0][0])
+                        # Try to read the recorded step value
+                        val = float(steps[step][0][0])
+                        step_val[i] = val
 
                     except Exception:
-                        print("Step value not found. Falling back to index.")
-                        step_val.append(float(step))
-
-                else:
-                    step_val.append(float(step))
+                        print("Step value not found; falling back to index.")
 
                 # Format the raw data
-                data = np.asarray(raw[step])
+                data = np.asarray(group_raw[step], dtype=np.float64)
 
                 # Initialize the spectrum instance
-                spectra.append(
-                    Spectrum(
-                        anode.process(data), time=time_per_step, **step_norm
-                    )
+                spec = Spectrum(
+                    anode.process(data), time=time_per_step, **step_norm
                 )
+
+                # Append the spectrum
+                spectra.append(spec)
 
         # Return the spectra and energies
         return spectra, step_val
@@ -169,82 +214,62 @@ class BaseScan:
     @steps.setter
     def steps(self, steps: NDArray) -> None:
         if isinstance(steps, np.ndarray):
-            if steps.shape == (len(self.spectra),):
-                self._steps = steps
+            if steps.shape != self._spectra.shape:
+                errmsg = "steps must be have the same length as spectra."
+                raise ValueError(errmsg)
 
-            else:
-                raise ValueError(
-                    "steps must be a 1D array of the same length as spectra."
-                )
+            self._steps = steps
+
         else:
-            raise ValueError("steps must be a numpy array.")
+            raise TypeError("steps must be a numpy array.")
 
     @property
-    def id(self) -> NDArray:
-        return self._id
+    def m_id(self) -> NDArray:
+        return self._m_id
 
     @id.setter
     def id(self, measurement_id: NDArray) -> None:
         raise AttributeError("Attribute 'id' is read-only.")
 
     @property
-    def roi(self) -> RegionOfInterest:
+    def roi(self) -> NDArray:
         return self._roi
 
     @roi.setter
-    def roi(self, roi: RegionOfInterest) -> None:
-        self._roi = self.prepare_roi(roi)
-
-    def prepare_roi(
-        self,
-        roi: RegionOfInterest | bool | None,
-    ) -> RegionOfInterest:
-        if roi is None:
-            return None
-
-        if isinstance(roi, bool):
-            if roi:
-                return self.roi
-
-            else:
-                return None
-
-        else:
-            try:
-                roi = np.array(roi, dtype=np.float64)
-                assert roi.shape == (2, 2)
-
-            except Exception as e:
-                errmsg = "roi must be provided as ((xmin, xmax), (ymin, ymax))"
-                raise ValueError(errmsg) from e
-
-            return roi
+    def roi(self, roi: ArrayLike) -> None:
+        self._roi = parse_roi(roi)
 
     def select_step_range(
         self,
-        step_range: Tuple[float, float],
-    ) -> Tuple[NDArray, NDArray]:
-        if step_range is not None:
-            try:
-                mask = (self.steps >= step_range[0]) & (
-                    self.steps <= step_range[1]
-                )
-                steps = self.steps[mask]
-                spectra = self.spectra[mask]
-
-            except Exception as e:
-                errmsg = "step_range must be (step_min, step_max)"
-                raise ValueError(errmsg) from e
-
-            return spectra, steps
-
-        else:
+        step_range: tuple[float, float] | None,
+    ) -> tuple[NDArray, NDArray]:
+        if step_range is None:
             return self.spectra, self.steps
+
+        step_range = np.asarray(step_range, dtype=np.float64)
+
+        if step_range.shape != (2,):
+            errmsg = "step_range must be a tuple (min, max)."
+            raise ValueError(errmsg)
+
+        if step_range[1] < step_range[0]:
+            errmsg = "step_range max < min."
+            raise ValueError(errmsg)
+
+        inds = np.argwhere(
+            (self.steps >= step_range[0]) & (self.steps <= step_range[1])
+        ).flatten()
+
+        if len(inds) == 0:
+            errmsg = f"No steps found in range {step_range}."
+            raise RuntimeError(errmsg)
+
+        return self.spectra[inds], self.steps[inds]
 
     def norm(
         self,
         norm: str,
-        step_range: Tuple[float, float] = None,
+        step_range: tuple[float, float] | None = None,
     ) -> NDArray:
         """Get the normalization values (and their standard deviation)
         for the specified parameter.
@@ -253,30 +278,33 @@ class BaseScan:
         ----------
         norm: str
             Name of the normalization parameter (`getattr(spectrum, norm)`).
-        step_range: Tuple[float, float], optional
-            Range of step values to consider. If None, all steps are
+        step_range: [float, float], optional
+            Range of step values to consider. If `None`, all steps are
             used.
 
         Returns
         -------
-        Tuple[NDArray, NDArray, NDArray]
-            The averaged normalization values, the respective standard
-            deviation, and the corresponding step values.
+        val: NDArray, shape (N,)
+            The averaged normalization values.
+        std: NDArray, shape (N,)
+            The respective standard deviations.
+        steps: NDArray, shape(N,)
+            The corresponding step values.
 
         """
         # Select the steps and corresponding spectra
         spectra, steps = self.select_step_range(step_range)
 
+        if not hasattr(spectra[0], norm):
+            errmsg = f"Unknown normalization {norm}."
+            raise AttributeError(errmsg)
+
         val = np.zeros_like(steps)
         std = np.zeros_like(steps)
 
         for i in range(len(val)):
-            if isinstance(getattr(spectra[i], norm), np.ndarray):
-                val[i] = getattr(spectra[i], norm)[0]
-                std[i] = getattr(spectra[i], norm)[1]
-
-            else:
-                val[i] = getattr(spectra[i], norm)
+            val[i] = getattr(spectra[i], norm)[0]
+            std[i] = getattr(spectra[i], norm)[1]
 
         return val, std, steps
 
@@ -327,44 +355,46 @@ class BaseScan:
 
     def remove_steps(
         self,
-        measurement_number: str,
-        steps: Union[Sequence[int], Sequence[float]],
-    ) -> NDArray:
+        measurement_id: str,
+        steps: ArrayLike,
+    ) -> None:
         """Remove the specified steps of a measurement from the scan.
 
         Parameters
         ----------
-        measurement_number: str
+        measurement_id: str
             Measurement number (metro) to remove the steps from.
-        steps: Union[Sequence[int], Sequence[float]]
+        steps: array_like
             List of step values to remove.
 
         """
         # Select the spectra corresponding to the measurement number
-        mask = np.argwhere(self.id == measurement_number).flatten()
+        inds = np.argwhere(self.m_id == measurement_id).flatten()
 
         # Check if the measurement number exists
-        if len(mask) == 0:
-            raise ValueError("Measurement number not found.")
+        if len(inds) == 0:
+            errmsg = f"No spectra found for m_id {measurement_id}."
+            raise ValueError(errmsg)
+
+        steps = np.array(steps, dtype=np.float64)
 
         # Select the steps to remove
-        inds = []
+        step_inds = []
         for step in steps:
             # Select the index of the closest step value
-            inds.append(np.argsort(np.abs(self.steps[mask] - step))[0])
+            step_inds.append(np.argsort(np.abs(self.steps[inds] - step))[0])
 
         # Check if the steps exist
-        if len(inds) == 0:
-            raise ValueError("Step values not found.")
+        if len(step_inds) == 0:
+            errmsg = f"Steps not found in {measurement_id}."
+            raise ValueError(errmsg)
 
-        mask = mask[inds]
+        inds = inds[step_inds]
 
         # Remove the steps
-        self._steps = np.delete(self.steps, mask)
-        self._spectra = np.delete(self.spectra, mask)
-        self._id = np.delete(self.id, mask)
-
-        return mask
+        self._steps = np.delete(self.steps, inds)
+        self._spectra = np.delete(self.spectra, inds)
+        self._id = np.delete(self.id, inds)
 
     def save(self, filepath: str) -> None:
         """
@@ -376,11 +406,15 @@ class BaseScan:
             Path to the file where the scan will be saved.
 
         """
+        if not filepath.endswith(".pkl") or not filepath.endswith(".pickle"):
+            errmsg = "filepath must end with '.pkl' or '.pickle'."
+            raise ValueError(errmsg)
+
         with open(filepath, "wb") as f:
             pickle.dump(self, f)
 
     @staticmethod
-    def load(filepath: str) -> Scan:
+    def load(filepath: str) -> BaseScan:
         """
         Load a scan with pickle.
 
@@ -391,7 +425,13 @@ class BaseScan:
 
         """
         with open(filepath, "rb") as f:
-            return pickle.load(f)
+            scan = pickle.load(f)
+
+        if not isinstance(scan, BaseScan):
+            errmsg = "Loaded object is not a scan."
+            raise TypeError(errmsg)
+
+        return scan
 
 
 class Scan(BaseScan):
@@ -399,213 +439,155 @@ class Scan(BaseScan):
 
     Parameters
     ----------
-    data_files: Sequence[str]
-        List of data files to be processed.
+    data_files: array_like
+        List of data files (str) to be processed.
     anode: PositionAnode
-        Anode object from `agepy.spec.photons`.
+        Anode object to process the raw data.
     scan_var: str, optional
-        Path to the step values in the data files. If None,
+        Path to the step values in the data files. If `None`,
         the keys are used as the values.
     raw: str, optional
-        Path to the raw data in the data files. Default:
-        "dld_rd#raw/0".
+        Path to the raw data in the data files.
     time_per_step: int, optional
-        Time per step in the scan. Default: None.
-    roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
+        Time per step in the scan.
+    roi: array_like, shape (2,2), optional
         Region of interest for the detector in the form
-        `((xmin, xmax), (ymin, ymax))`. Default: None.
-    **norm
-        Normalization parameters as keyword arguments with the name as
-        key and the h5 path as the value. For example,
-        `intensity_upstream = mirror#value`.
+        `((xmin, xmax), (ymin, ymax))`.
+    qeff: [np.ndarray, np.ndarray, np.ndarray], optional
+        Detector efficiencies in the form `(values, errors, x)`
+        with shapes (M,).
+    bkg: Spectrum, optional
+        Background spectrum (dark counts) to be subtracted from
+        the spectra.
+    calib: array_like, shape (2,2), optional
+        Wavelength calibration parameters in the form
+        `((a0, err), (a1, err))`, where `a0` and `a1`
+        correspond to $\\lambda = a_1 x + a_0$ and `err` to the
+        respective uncertainties.
+    **normalize: str
+        Path to additional normalization parameters as keyword
+        arguments like the upstream intensity or target density.
 
     Attributes
     ----------
-    anode: PositionAnode
-        Anode object from `agepy.spec.photons`.
-    spectra: NDArray
+    spectra: np.ndarray, shape (N,)
         Array of the loaded Spectrum objects.
-    steps: NDArray
+    steps: np.ndarray, shape (N,)
         Array of the scan variable values.
-    id: NDArray
+    m_id: np.ndarray, shape (N,)
         Array of the measurement numbers.
-    roi: Tuple[Tuple[float, float], Tuple[float, float]]
+    roi: np.ndarray, shape (2,2)
         Region of interest for the detector.
-    qeff: Tuple[NDArray, NDArray, NDArray]
-        Detector efficiencies in the form `(values, errors, x)`.
-    bkg: Spectrum
+    qeff: [np.ndarray, np.ndarray, np.ndarray] or None
+        Detector efficiencies in the form `(values, errors, x)`
+        with shapes (M,).
+    bkg: Spectrum or None
         Background spectrum (dark counts) to be subtracted.
-    calib: Tuple[Tuple[float, float], Tuple[float, float]]
+    calib: np.ndarray, shape (2,2)
         Wavelength calibration parameters in the form
-        `((a0, err), (a1, err))`.
+        `((a0, err), (a1, err))`, where `a0` and `a1`
+        correspond to $\\lambda = a_1 x + a_0$ and `err` to the
+        respective uncertainties.
 
     """
 
     def __init__(
         self,
-        data_files: Sequence[str],
+        data_files: str | ArrayLike,
         anode: PositionAnode,
-        scan_var: str = None,
+        scan_var: str | None = None,
         raw: str = "dld_rd#raw",
-        time_per_step: Union[int, Sequence[int]] = None,
-        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-        **norm,
+        time_per_step: int | ArrayLike | None = None,
+        roi: ArrayLike = ((0, 1), (0, 1)),
+        qeff: tuple[NDArray, NDArray, NDArray] | None = None,
+        bkg: Spectrum | None = None,
+        calib: ArrayLike = ((0, 0), (1, 0)),
+        **normalize: str,
     ) -> None:
         # Load and process data
         super().__init__(
-            data_files, anode, scan_var, raw, time_per_step, roi, **norm
+            data_files,
+            anode,
+            scan_var=scan_var,
+            raw=raw,
+            time_per_step=time_per_step,
+            roi=roi,
+            **normalize,
         )
 
         # Set attributes
-        self._qeff = None  # Detector efficiencies
-        self._bkg = None  # Background spectrum (dark counts)
-        self._calib = None  # Wavelength calibration
+        self.qeff = qeff  # Detector efficiencies
+        self.bkg = bkg  # Background spectrum (dark counts)
+        self.calib = calib  # Wavelength calibration
 
     @property
-    def qeff(self) -> Tuple[NDArray, NDArray, NDArray]:
+    def qeff(self) -> tuple[NDArray, NDArray, NDArray] | None:
         return self._qeff
 
     @qeff.setter
-    def qeff(self, qeff: Tuple[NDArray, NDArray, NDArray]) -> None:
-        self._qeff = self.prepare_qeff(qeff)
+    def qeff(
+        self, qeff: tuple[NDArray, NDArray, NDArray] | Scan | None
+    ) -> None:
+        if qeff is None:
+            self._qeff = None
+
+        elif isinstance(qeff, Scan):
+            self._qeff = parse_qeff(*qeff.qeff)
+
+        else:
+            self._qeff = parse_qeff(*qeff)
 
     @property
-    def bkg(self) -> Spectrum:
+    def bkg(self) -> Spectrum | None:
         return self._bkg
 
     @bkg.setter
-    def bkg(self, bkg: Spectrum) -> None:
-        self._bkg = self.prepare_bkg(bkg)
+    def bkg(self, bkg: Spectrum | None) -> None:
+        if bkg is None:
+            self._bkg = None
+
+        elif isinstance(bkg, Spectrum):
+            self._bkg = bkg
+
+        else:
+            errmsg = "bkg must be Spectrum or None."
+            raise TypeError(errmsg)
 
     @property
-    def calib(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    def calib(self) -> NDArray:
         return self._calib
 
     @calib.setter
-    def calib(
-        self, calib: Tuple[Tuple[float, float], Tuple[float, float]]
-    ) -> None:
-        self._calib = self.prepare_calib(calib)
-
-    def prepare_qeff(
-        self,
-        qeff: Tuple[NDArray, NDArray, NDArray],
-    ) -> None:
-        if qeff is None:
-            return None
-
-        if isinstance(qeff, bool):
-            if qeff:
-                return self.qeff
-
-            else:
-                return None
-
-        from .qeff import QEffScan
-
-        if isinstance(qeff, QEffScan):
-            return qeff.qeff
-
-        try:
-            values = np.array(qeff[0])
-            errors = np.array(qeff[1])
-            x = np.array(qeff[2])
-
-            # Check if the arrays have the same length
-            assert len(values) == len(errors)
-            assert len(values) == len(x)
-            # Check if the values and errors are positive
-            assert np.all(values > 0)
-            assert np.all(errors >= 0)
-            # Check if x is between 0 and 1
-            assert np.all(x > 0)
-            assert np.all(x < 1)
-
-        except Exception as e:
-            errmsg = "qeff could not be parsed"
-            raise ValueError(errmsg) from e
-
-        return values, errors, x
-
-    def prepare_bkg(
-        self,
-        bkg: Spectrum,
-    ) -> Spectrum:
-        if bkg is None:
-            return None
-
-        if isinstance(bkg, bool):
-            if bkg:
-                return self.bkg
-
-            else:
-                return None
-
-        elif isinstance(bkg, Spectrum):
-            return bkg
-
-        else:
-            raise ValueError("bkg could not be parsed.")
-
-    def prepare_calib(
-        self,
-        calib: Tuple[Tuple[float, float], Tuple[float, float]],
-    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        if calib is None:
-            return None
-
-        if isinstance(calib, bool):
-            if calib:
-                return self.calib
-
-            else:
-                return None
-
-        try:
-            calib_params = np.array(calib, dtype=np.float64)
-            assert calib_params.shape == (2, 2)
-
-        except Exception as e:
-            errmsg = "calib could not be parsed"
-            raise ValueError(errmsg) from e
-
-        return calib_params
+    def calib(self, calib: ArrayLike) -> None:
+        self._calib = parse_calib(calib)
 
     def counts(
         self,
-        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
-        qeff: bool = True,
         bkg: bool = True,
-        step_range: Tuple[float, float] = None,
-    ) -> Tuple[NDArray, NDArray, NDArray]:
-        """Get the photon-excitation energy spectrum.
+        step_range: tuple[float, float] | None = None,
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """Get the photon counts for each step.
 
         Parameters
         ----------
-        roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
-            Region of interest for the detector in the form
-            `((xmin, xmax), (ymin, ymax))`. Defaults to the roi set for
-            the `Scan` instance.
-        qeff: bool, optional
-            Whether to apply the spatial detector efficiencies if
-            available.
         bkg: bool, optional
             Whether to subtract the background spectrum if available.
-        step_range: Tuple[float, float], optional
+        step_range: [float, float], optional
             Range of step values to consider. If None, all steps are
             used.
 
         Returns
         -------
-        Tuple[NDArray, NDArray, NDArray]
-            The number of counts (normalized), the respective
-            uncertainties, and the corresponding step values.
+        n: NDArray, shape (N,)
+            The (normalized) counts.
+        err: NDArray, shape (N,)
+            The respective uncertainties.
+        steps: NDArray, shape (N,)
+            The corresponding step values.
 
         """
         # Parse the given calculation options
-        roi = self.prepare_roi(roi)
-        qeff = self.prepare_qeff(qeff)
-        bkg = self.prepare_bkg(bkg)
+        bkg = self.bkg if bkg else None
 
         # Select the steps and corresponding spectra
         spectra, steps = self.select_step_range(step_range)
@@ -614,35 +596,32 @@ class Scan(BaseScan):
         err = np.zeros_like(steps)
 
         for i in range(len(n)):
-            n[i], err[i] = spectra[i].counts(roi=roi, qeff=qeff, bkg=bkg)
+            n[i], err[i] = spectra[i].counts(roi=self.roi, bkg=bkg)
 
         return n, err, steps
 
     def spectrum_at(
         self,
         idx: int,
-        edges: NDArray,
-        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
+        bins: int | ArrayLike,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
-        err_prop: Literal["montecarlo", "none"] = "montecarlo",
+        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
         mc_samples: int = 10000,
-    ) -> Tuple[NDArray, NDArray]:
+        mc_seed: int | None = None,
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
         Parameters
         ----------
         idx: int
             Index of the step to get the spectrum for.
-        edges: NDArray
-            Bin edges for the histogram. For a calibrated spectrum,
-            these should be in wavelength units. For an uncalibrated
-            spectrum, these should be between 0 and 1.
-        roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
-            Region of interest for the detector in the form
-            `((xmin, xmax), (ymin, ymax))`. If not provided, the
-            full detector is used.
+        bins: int or array_like
+            Bin number or edges for the histogram. For a calibrated
+            spectrum, these edges should be in wavelength units.
+            For an uncalibrated spectrum, these should be between
+            0 and 1.
         qeff: bool, optional
             Whether to apply the spatial detector efficiencies if
             available.
@@ -650,64 +629,71 @@ class Scan(BaseScan):
             Whether to subtract the background spectrum if available.
         calib: bool, optional
             Whether to apply the wavelength calibration if available.
-        err_prop: Literal["montecarlo", "none"], optional
+        uncertainties: Literal["montecarlo", "poisson"], optional
             Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration. If
-            `qeff = None` and `calib = None` and `bkg = None`, this
-            setting has no effect. Can be 'montecarlo', or 'none'.
+            the efficiencies and the wavelength calibration.
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
-            Has no effect if `err_prop = 'none'`.
+        mc_seed: int, optional
+            Seed for the NumPy random generator.
 
         Returns
         -------
-        Tuple[NDArray, NDArray]
-            The spectrum and its uncertainties.
+        spec: np.array, shape (N,)
+            The (normalized) bin counts.
+        err: np.array, shape (N,)
+            The uncertainties of the bin counts propagated depending
+            on the `uncertainties` argument.
+        edges: np.array, shape (N+1,)
+            The bin edges.
 
         """
         # Parse the given calculation options
-        roi = self.prepare_roi(roi)
-        qeff = self.prepare_qeff(qeff)
-        bkg = self.prepare_bkg(bkg)
-        calib = self.prepare_calib(calib)
+        qeff = self.qeff if qeff else None
+        bkg = self.bkg if bkg else None
+        calib = self.calib if calib else ((0, 0), (1, 0))
+
+        # Check index
+        if idx >= len(self.steps) or idx < 0:
+            errmsg = f"Index {idx} out of range."
+            raise IndexError(errmsg)
 
         # Calculate the spectrum at the specified index
         return self.spectra[idx].spectrum(
-            edges,
-            roi=roi,
+            bins,
+            roi=self.roi,
             qeff=qeff,
             bkg=bkg,
             calib=calib,
-            err_prop=err_prop,
+            uncertainties=uncertainties,
             mc_samples=mc_samples,
+            mc_seed=mc_seed,
         )
 
     def spectrum_at_step(
         self,
-        step: Union[int, float],
-        edges: NDArray,
-        roi: Tuple[Tuple[float, float], Tuple[float, float]] = None,
+        step: int | float | str,
+        bins: int | ArrayLike,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
-        err_prop: Literal["montecarlo", "none"] = "montecarlo",
+        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
         mc_samples: int = 10000,
-    ) -> Tuple[NDArray, NDArray]:
+        mc_seed: int | None = None,
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
         Parameters
         ----------
-        step: Union[int, float]
-            Step value to get the spectrum for. The closest step value
+        step: int or float or str
+            Step value to get the spectrum for. The value is
+            converted to float and the closest step value
             is used.
-        edges: NDArray
-            Bin edges for the histogram. For a calibrated spectrum,
-            these should be in wavelength units. For an uncalibrated
-            spectrum, these should be between 0 and 1.
-        roi: Tuple[Tuple[float, float], Tuple[float, float]], optional
-            Region of interest for the detector in the form
-            `((xmin, xmax), (ymin, ymax))`. If not provided, the
-            full detector is used.
+        bins: int or array_like
+            Bin number or edges for the histogram. For a calibrated
+            spectrum, these edges should be in wavelength units.
+            For an uncalibrated spectrum, these should be between
+            0 and 1.
         qeff: bool, optional
             Whether to apply the spatial detector efficiencies if
             available.
@@ -715,37 +701,45 @@ class Scan(BaseScan):
             Whether to subtract the background spectrum if available.
         calib: bool, optional
             Whether to apply the wavelength calibration if available.
-        err_prop: Literal["montecarlo", "none"], optional
+        uncertainties: Literal["montecarlo", "poisson"], optional
             Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration. If
-            `qeff = None` and `calib = None` and `bkg = None`, this
-            setting has no effect. Can be 'montecarlo', or 'none'.
+            the efficiencies and the wavelength calibration.
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
-            Has no effect if `err_prop = 'none'`.
+        mc_seed: int, optional
+            Seed for the NumPy random generator.
 
         Returns
         -------
-        Tuple[NDArray, NDArray]
-            The spectrum and its uncertainties.
+        spec: np.array, shape (N,)
+            The (normalized) bin counts.
+        err: np.array, shape (N,)
+            The uncertainties of the bin counts propagated depending
+            on the `uncertainties` argument.
+        edges: np.array, shape (N+1,)
+            The bin edges.
 
         """
         # Find the index of the step closest to the given value
-        idx = np.argmin(np.abs(self.steps - step))
+        idx = np.argmin(np.abs(self.steps - float(step)))
 
         return self.spectrum_at(
             idx,
-            edges,
-            roi=roi,
+            bins,
             qeff=qeff,
             bkg=bkg,
             calib=calib,
-            err_prop=err_prop,
+            uncertainties=uncertainties,
             mc_samples=mc_samples,
+            mc_seed=mc_seed,
         )
 
     def show_spectra(self):
-        """Plot the spectra in an interactive window."""
+        """Plot the spectra in an interactive window.
+
+        PySide6 or PyQt6 needs to be installed for this to work.
+
+        """
         from agepy.interactive import run
         from ._interactive_scan import SpectrumViewer
 

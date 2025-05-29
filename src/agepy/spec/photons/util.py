@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def parse_roi(roi: ArrayLike) -> NDArray:
-    roi = np.asarray(roi, dtype=np.float64)
+    roi = np.array(roi, dtype=np.float64)
 
     # Check if roi has the correct shape
     if roi.shape != (2, 2):
@@ -34,7 +34,7 @@ def parse_roi(roi: ArrayLike) -> NDArray:
 
 
 def parse_calib(calib: ArrayLike) -> NDArray:
-    calib = np.asarray(calib, dtype=np.float64)
+    calib = np.array(calib, dtype=np.float64)
 
     # Check if roi has the correct shape
     if calib.shape != (2, 2):
@@ -47,9 +47,9 @@ def parse_calib(calib: ArrayLike) -> NDArray:
 def parse_qeff(
     val: ArrayLike, err: ArrayLike, x: ArrayLike
 ) -> tuple[NDArray, NDArray, NDArray]:
-    val = np.asarray(val, dtype=np.float64)
-    err = np.asarray(err, dtype=np.float64)
-    x = np.asarray(x, dtype=np.float64)
+    val = np.array(val, dtype=np.float64)
+    err = np.array(err, dtype=np.float64)
+    x = np.array(x, dtype=np.float64)
 
     # Check array shapes
     if val.shape != err.shape:
