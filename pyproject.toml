@@ -47,6 +47,9 @@ docs = [
     "sphinx-copybutton>=0.5.2",
     "sphinx-rtd-theme>=3.0.2",
 ]
+spec = [
+    "pint>=0.24.4",
+]
 
 [project.urls]
 GitHub = "https://github.com/exp4-age/agepy"

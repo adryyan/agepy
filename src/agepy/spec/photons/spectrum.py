@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
-from numba import njit, jit, prange
+from numba import njit, prange
 from jacobi import propagate
 from matplotlib import gridspec
 import matplotlib.colors as mcolors
@@ -397,8 +397,9 @@ class Spectrum:
         qeff: tuple[NDArray, NDArray, NDArray] | None = None,
         bkg: Spectrum | None = None,
         calib: ArrayLike = ((0, 0), (1, 0)),
-        uncertainties: Literal["montecarlo", "gauss"] = "montecarlo",
+        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
         mc_samples: int = 10000,
+        mc_seed: int | None = None,
     ) -> tuple[NDArray, NDArray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
@@ -406,9 +407,10 @@ class Spectrum:
         Parameters
         ----------
         bins: int or array_like
-            Bin edges for the histogram. For a calibrated spectrum,
-            these should be in wavelength units. For an uncalibrated
-            spectrum, these should be between 0 and 1.
+            Bin number or edges for the histogram. For a calibrated
+            spectrum, bin edges should be in wavelength units.
+            For an uncalibrated spectrum, these should be between
+            0 and 1.
         roi: array_like, shape (2,2), optional
             Region of interest for the detector in the form
             `((xmin, xmax), (ymin, ymax))`. If not provided, the
@@ -426,7 +428,7 @@ class Spectrum:
             `((a0, err), (a1, err))`, where `a0` and `a1`
             correspond to $\\lambda = a_1 x + a_0$ and `err` to the
             respective uncertainties.
-        uncertainties: Literal["montecarlo", "gauss"], optional
+        uncertainties: Literal["montecarlo", "poisson"], optional
             Error propagation method for handling the uncertainties of
             the efficiencies and the wavelength calibration. If
             `qeff = None` and `calib = None`, this setting has no
@@ -434,6 +436,9 @@ class Spectrum:
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
             Has no effect if `err_prop = 'none'`.
+        mc_seed: int, optional
+            Seed for the numpy random generator.
+            See `numpy.random.Generator`.
 
         Returns
         -------
@@ -441,6 +446,8 @@ class Spectrum:
             The spectrum in the form of bin values.
         err: np.ndarray, shape (N-1,)
             The respective uncertainties of the bin values.
+        edges: np.ndarray, shape (N,)
+            The bin edges from `numpy.histogram`.
 
         """
         # Get x and y values of the photon hits
@@ -489,6 +496,8 @@ class Spectrum:
 
             bkg_ratio = self._t / bkg._t
 
+            bkg = (bkg_data, bkg_ratio)
+
         # Adjust x roi filter to wavelength binning
         wl_min = calib[1, 0] * roi[0, 0] + calib[0, 0]
         wl_max = calib[1, 0] * roi[0, 1] + calib[0, 0]
@@ -500,34 +509,31 @@ class Spectrum:
 
         if uncertainties == "montecarlo":
             # Initialize the random number generator
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(mc_seed)
 
             # Initialize array for storing the sample results
-            spectrum = np.zeros((mc_samples, nbins), dtype=np.float64)
+            mc_spec = np.zeros((mc_samples, nbins), dtype=np.float64)
 
-            spectrum = montecarlo_spectrum_nobkg(
-                spectrum,
-                data,
-                xedges,
-                rng,
-                mc_samples,
-                calib,
-                qeff,
+            mc_spec = montecarlo_spectrum(
+                mc_spec, data, xedges, rng, mc_samples, calib, bkg, qeff
             )
 
             # Calculate mean and standard deviation of the sampled spectra
-            # spectrum = np.mean(mc_spectrum, axis=0)
-            errors = np.std(spectrum, ddof=1, axis=0)
-            spectrum = np.mean(spectrum, axis=0)
+            spec = np.mean(mc_spec, axis=0, keepdims=True)
+            err = np.std(mc_spec, ddof=1, axis=0, mean=spec)
+            spec = spec.flatten()
 
-        elif uncertainties == "gauss":
+            # Make sure the memory is released
+            del mc_spec
+
+        elif uncertainties == "poisson":
             # Calibrate the data
             data = calib[1, 0] * data + calib[0, 0]
 
             # Histogram the data without the efficiencies
-            spectrum = np.histogram(data, bins=xedges)[0]
-            spectrum = np.asarray(spectrum, dtype=np.float64)
-            errors = np.sqrt(spectrum)
+            spec = np.histogram(data, bins=xedges)[0]
+            spec = np.asarray(spec, dtype=np.float64)
+            err = np.sqrt(spec)
 
             if bkg is not None:
                 bkg = np.histogram(bkg_data, bins=xedges)[0]
@@ -538,9 +544,9 @@ class Spectrum:
                 bkg_err = np.sqrt(bkg)
 
                 # Subtract background
-                spectrum -= bkg
-                spectrum[spectrum < 0] = 0
-                errors = np.sqrt(errors**2 + bkg_err**2)
+                spec -= bkg
+                spec[spec < 0] = 0
+                err = np.sqrt(err**2 + bkg_err**2)
 
             if qeff is not None:
                 qeff_val, qeff_err, qeff_x = qeff
@@ -572,41 +578,40 @@ class Spectrum:
 
                     return spec
 
-                spectrum, errors = propagate(
+                spec, err = propagate(
                     apply_qeff,
-                    spectrum,
-                    errors**2,
+                    spec,
+                    err**2,
                     qeff_val,
                     qeff_err**2,
                     diagonal=True,
                 )
-                errors = np.sqrt(errors).flatten()
+                err = np.sqrt(err).flatten()
 
         else:
-            errmsg = "uncertainties must be 'montecarlo' or 'gauss'."
+            errmsg = "uncertainties must be 'montecarlo' or 'poisson'."
             raise ValueError(errmsg)
 
         # Normalize data to measurement duration per step
         if self._t is not None:
-            spectrum /= self._t
-            errors /= self._t
+            spec /= self._t
+            err /= self._t
 
         # Normalize data to account for beam intensity, gas
         # pressure, etc.
-        """
         for normalize in self._norm:
-            val, err = getattr(self, normalize)
-            errors = np.sqrt(
-                errors**2 / val**2 + err**2 * spectrum**2 / val**4
+            norm_val, norm_err = getattr(self, normalize)
+            err = np.sqrt(
+                err**2 / norm_val**2 + norm_err**2 * spec**2 / norm_val**4
             )
-            spectrum /= val
-        """
+            spec /= norm_val
+
         # Apply x roi filter
-        spectrum[roi[:-1]] = 0
-        errors[roi[:-1]] = 0
+        spec[roi[:-1]] = 0
+        err[roi[:-1]] = 0
 
         # Return the spectrum and uncertainties
-        return spectrum, errors
+        return spec, err, xedges
 
     def transform_norm(self, norm: str, func: callable) -> None:
         """Transform the specified normalization values using a given
@@ -622,14 +627,18 @@ class Spectrum:
             float.
 
         """
+        if not hasattr(self, norm):
+            errmsg = f"Unknown normalization {norm}"
+            raise ValueError(errmsg)
+
+        # Get the current value and uncertainty
         val = getattr(self, norm)
 
-        if isinstance(val, np.ndarray):
-            val, err = propagate(func, val[0], val[1] ** 2)
-            setattr(self, norm, np.array([val, np.sqrt(err)]))
+        # Call function and propagate the uncertainty
+        val, err = propagate(func, val[0], val[1] ** 2)
 
-        else:
-            setattr(self, norm, func(val))
+        # Set the transformed nomalization
+        setattr(self, norm, np.array([val, np.sqrt(err)]))
 
     def convert_unit(self, norm: str, fro: str, to: str) -> None:
         """Convert the specified normalization values to a different
@@ -640,18 +649,21 @@ class Spectrum:
         norm: str
             Name of the normalization parameter to convert.
         fro: str
-            Unit to convert from.
+            Unit to convert from (pint).
         to: str
-            Unit to convert to.
+            Unit to convert to (pint).
 
         """
+        # Try to import pint
         try:
             from pint import UnitRegistry
 
         except ImportError as e:
-            raise ImportError("pint is required to convert units.") from e
+            errmsg = "pint is required to convert units."
+            raise ImportError(errmsg) from e
 
         ureg = UnitRegistry()
+
         # Convert the normalization values
         self.transform_norm(norm, lambda x: ureg.Quantity(x, fro).m_as(to))
 
@@ -704,109 +716,82 @@ def numba_weighted_histogram(
     return hist
 
 
-@jit(parallel=True, nopython=False)
-def montecarlo_spectrum_nobkg(
-    spectrum, data, xedges, rng, mc_samples, calib, qeff
-):
-    # Prepare data
-    data_counts = data.shape[0]
-
-    # Prepare the quantum efficiency correction
-    qeff_val, qeff_err, qeff_x = qeff
-    n_eff = qeff_val.shape[0]
-
-    # Define the interpolation grid
-    xe = np.linspace(0, 1, 513)
-    x = (xe[1:] + xe[:-1]) * 0.5
-
-    # Assign the data points to the bins
-    inds = np.digitize(data[0], xe[1:-1])
-
-    # Start the Monte Carlo simulation
-    for i in prange(mc_samples):
-        # Create a sample of the efficiencies
-        eff_sample = np.ones(n_eff)
-        for j in range(n_eff):
-            eff_sample[j] = rng.normal(qeff_val[j], qeff_err[j], size=1)[0]
-
-        # Interpolate the efficiencies to get a smoother spectrum
-        eff_sample = np.interp(x, qeff_x, eff_sample)
-
-        # Get the efficiencies for each point
-        data_eff = 1 / eff_sample[inds]
-
-        # Select data points based on Poisson sampling
-        p = rng.poisson(lam=data_counts, size=1)[0]
-        poisson_inds = rng.integers(0, data_counts, size=p)
-        data_sample = data[poisson_inds]
-        data_eff = data_eff[poisson_inds]
-
-        # Convert x values to wavelengths
-        a0_sample = rng.normal(calib[0, 0], calib[0, 1], size=1)[0]
-        a1_sample = rng.normal(calib[1, 0], calib[1, 1], size=1)[0]
-        data_sample = a1_sample * data_sample + a0_sample
-
-        # Calculate the sum of weights for each bin, i.e. the weighted spectrum
-        spectrum[i] = numba_weighted_histogram(data_sample, xedges, data_eff)
-
-    # Return the n generated Monte Carlo spectra
-    return spectrum
-
-
 @njit(parallel=True)
 def montecarlo_spectrum(
-    spectrum, data, xedges, rng, mc_samples, calib, bkg, qeff
-):
+    spectrum: NDArray,
+    data: NDArray,
+    xedges: NDArray,
+    rng: np.random.Generator,
+    mc_samples: int,
+    calib: NDArray,
+    bkg: tuple[NDArray, float] | None,
+    qeff: tuple[NDArray, NDArray, NDArray] | None,
+) -> NDArray:
     # Prepare data
     data_counts = data.shape[0]
-
-    # Prepare the quantum efficiency correction
-    qeff_val, qeff_err, qeff_x = qeff
-    n_eff = qeff_val.shape[0]
 
     # Define the interpolation grid
     xe = np.linspace(0, 1, 513)
     x = (xe[1:] + xe[:-1]) * 0.5
 
     # Assign the data points to the bins
-    inds = np.digitize(data[0], xe[1:-1])
+    inds = np.digitize(data, xe[1:-1])
+
+    # Prepare the quantum efficiency correction
+    interp_qeff = False
+    data_eff = np.ones(data_counts, dtype=np.float64)
+
+    if qeff is not None:
+        qeff_val, qeff_err, qeff_x = qeff
+
+        interp_qeff = True
+
+        n_eff = qeff_val.shape[0]
 
     # Prepare the background subtraction
-    bkg_data, bkg_ratio = bkg
-    bkg_sample_size = int(bkg_data.shape[0] * bkg_ratio)
+    subtr_bkg = False
+    if bkg is not None:
+        bkg_data, bkg_ratio = bkg
 
-    # Calculate the background distribution
-    bkg_pdf = numba_histogram(bkg_data, xe)
+        subtr_bkg = True
 
-    # Assign the background probabilities to the data points
-    bkg_prob = bkg_pdf[inds]
+        bkg_sample_size = int(bkg_data.shape[0] * bkg_ratio)
+
+        # Calculate the background distribution
+        bkg_pdf = numba_histogram(bkg_data, xe)
+
+        # Assign the background probabilities to the data points
+        bkg_prob = bkg_pdf[inds]
 
     # Start the Monte Carlo simulation
     for i in prange(mc_samples):
         # Create a sample of the efficiencies
-        eff_sample = np.ones(n_eff, dtype=np.float64)
-        for j in range(n_eff):
-            eff_sample[j] = rng.normal(qeff_val[j], qeff_err[j], size=1)[0]
+        if interp_qeff:
+            eff_sample = np.ones(n_eff, dtype=np.float64)
+            for j in range(n_eff):
+                eff_sample[j] = rng.normal(qeff_val[j], qeff_err[j], size=1)[0]
 
-        # Interpolate the efficiencies to get a smoother spectrum
-        eff_sample = np.interp(x, qeff_x, eff_sample)
+            # Interpolate the efficiencies to get a smoother spectrum
+            eff_sample = np.interp(x, qeff_x, eff_sample)
 
-        # Get the efficiencies for each point
-        data_eff = 1 / eff_sample[inds]
+            # Get the efficiencies for each point
+            data_eff = 1 / eff_sample[inds]
 
         # Select data points based on Poisson sampling
         p = rng.poisson(lam=data_counts, size=1)[0]
         poisson_inds = rng.integers(0, data_counts, size=p)
         data_sample = data[poisson_inds]
         data_eff = data_eff[poisson_inds]
-        bkg_sample = bkg_prob[poisson_inds]
 
-        # Remove data points based on the background distribution
-        p = rng.poisson(lam=bkg_sample_size, size=1)[0]
-        bkg_cdf = np.cumsum(bkg_sample)
-        remove_inds = np.searchsorted(bkg_cdf, rng.random(p) * bkg_cdf[-1])
-        data_sample = np.delete(data_sample, remove_inds)
-        data_eff = np.delete(data_eff, remove_inds)
+        if subtr_bkg:
+            bkg_sample = bkg_prob[poisson_inds]
+
+            # Remove data points based on the background distribution
+            p = rng.poisson(lam=bkg_sample_size, size=1)[0]
+            bkg_cdf = np.cumsum(bkg_sample)
+            remove_inds = np.searchsorted(bkg_cdf, rng.random(p) * bkg_cdf[-1])
+            data_sample = np.delete(data_sample, remove_inds)
+            data_eff = np.delete(data_eff, remove_inds)
 
         # Convert x values to wavelengths
         a0_sample = rng.normal(calib[0, 0], calib[0, 1], size=1)[0]
