@@ -5,9 +5,7 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Union, Tuple
-
-# Classes implementing the various types of anodes
+    from numpy.typing import NDArray
 
 
 class PositionAnode:
@@ -17,24 +15,27 @@ class PositionAnode:
     ----------
     angle: int or float
         Rotation of detector.
-    scale: tuple
+    scale: [float, float]
         scale = (scale_x, scale_y)
-    offset: tuple
+    offset: [float, float]
         offset = (offset_x, offset_y)
 
     """
 
     def __init__(
         self,
-        angle: Union[int, float],
-        scale: Tuple[float, float],
-        offset: Tuple[float, float],
+        angle: int | float,
+        scale: tuple[float, float],
+        offset: tuple[float, float],
     ) -> None:
-        self.transform = np.zeros((2, 2), dtype=float)
-        self.offset = np.zeros((2,), dtype=float)
+        # Prepare rotation and offset matrix
+        self.transform = np.zeros((2, 2), dtype=np.float64)
+        self.offset = np.zeros((2,), dtype=np.float64)
+
         pre_v, post_v = angle * np.pi / 180, 0 * np.pi / 180
         pre_sin, post_sin = np.sin(pre_v), np.sin(post_v)
         pre_cos, post_cos = np.cos(pre_v), np.cos(post_v)
+
         # First, rotate by the pre matrix, then scale and
         # afterwards rotate again by the post matrix.
         # The components are the product of these three matrices in
@@ -51,13 +52,19 @@ class PositionAnode:
         self.transform[1, 1] = pre_sin * post_sin * (
             -scale[0]
         ) + pre_cos * post_cos * (+scale[1])
+
         # +0.5 for the offset introduced by centering the image on
         # the origin.
         self.offset[0] = offset[0] + 0.5
         self.offset[1] = offset[1] + 0.5
 
-    def process(self, rows):
-        """Needs documentation."""
+    def process(self, rows: NDArray) -> NDArray:
+        """Rotate, scale and shift the x, y coordinates.
+
+        This is called by all anodes after conversion to
+        x, y coordinates.
+
+        """
         rows = rows[:, :2] - 0.5
         rows = rows.dot(self.transform) + self.offset
 
@@ -120,17 +127,17 @@ class DldAnodeXY(DldAnode):
 
     """
 
-    def process(self, rows: np.ndarray) -> np.ndarray:
+    def process(self, rows: NDArray) -> NDArray:
         """Processes the raw data probably found in dld_rd#raw.
 
         Parameters
         ----------
-        rows: np.ndarray
+        rows: np.ndarray, shape (N,4)
             Raw data from the detector.
 
         Returns
         -------
-        np.ndarray
+        pos: np.ndarray, shape (N,2)
             Processed data in form of xy values.
 
         """
@@ -159,17 +166,17 @@ class DldAnodeUVW(DldAnode):
 
     """
 
-    def process(self, rows: np.ndarray) -> np.ndarray:
+    def process(self, rows: NDArray) -> NDArray:
         """Processes the raw data probably found in dld_rd#raw.
 
         Parameters
         ----------
-        rows: np.ndarray
+        rows: np.ndarray, shape (N,6)
             Raw data from the detector.
 
         Returns
         -------
-        np.ndarray
+        pos: np.ndarray, shape (N,2)
             Processed data in form of xy values.
 
         """
