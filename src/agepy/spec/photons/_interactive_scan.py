@@ -1,29 +1,18 @@
 from __future__ import annotations
-import warnings
 
-# Import importlib.resources for getting the icon paths
-from importlib.resources import path as ilrpath
-
-# Import PySide6 / PyQt6 modules
 try:
-    from PySide6 import QtGui, QtWidgets, QtCore
-
-    qt_binding = "PySide6"
+    from PySide6 import QtGui
 
 except ImportError:
-    wrnmsg = "PySide6 not found, trying PyQt6. Some features may not work."
-    warnings.warn(wrnmsg, stacklevel=1)
-
     try:
-        from PyQt6 import QtGui, QtWidgets, QtCore
-
-        qt_binding = "PyQt6"
+        from PyQt6 import QtGui
 
     except ImportError as e:
-        errmsg = "No compatible Qt bindings found."
+        errmsg = "No compatible Qt bindings found. Install PySide6 or PyQt6."
         raise ImportError(errmsg) from e
 
-# Import internal modules
+from importlib.resources import path as ilrpath
+
 from agepy.interactive import MainWindow
 from agepy import ageplot
 
@@ -31,52 +20,44 @@ from agepy import ageplot
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agepy.spec.photons import Scan
-    import numpy as np
-
-__all__ = ["SpectrumViewer"]
+    from .scan import Scan
+    from numpy.typing import ArrayLike
 
 
 class SpectrumViewer(MainWindow):
     """Show all spectra in a scan."""
 
-    def __init__(self, scan: Scan, edges: np.ndarray) -> None:
-        super().__init__(title="Spectrum Viewer")
+    def __init__(self, scan: Scan, bins: int | ArrayLike) -> None:
         # Set up the main window
+        super().__init__(title="Spectrum Viewer")
         self.add_plot()
         self.add_toolbar()
         self.add_forward_backward_action(self.plot_previous, self.plot_next)
 
         # Add actions for the calculation options
-        self.calc_options = [False, False, False, False]
-        self.actions = []
+        self.calc_options = {}
         self.add_action_calc_option("qeff")
         self.add_action_calc_option("bkg")
-        self.add_action_calc_option("cal")
+        self.add_action_calc_option("calib")
+
         with ilrpath("agepy.interactive.icons", "errorbar.svg") as ipath:
             icon = QtGui.QIcon(str(ipath))
-        self.add_action_calc_option("Show Uncertainties", icon=icon)
 
-        # Set the options
-        self.mc_samples = 10000
-        # Remember the edges and the scan
-        self.edges = edges
+        self.add_action_calc_option("montecarlo", icon=icon)
+
+        # Store references to the bins and the scan
+        self.bins = bins
         self.scan = scan
-        # Intialize the data
-        self.x = None
-        self.y = None
-        self.yerr = None
+
         # Remember current step
         self.step = 0
+
         # Plot the first step
         self.plot()
 
     def add_action_calc_option(
-        self, text: str, icon: QtGui.QIcon = None
+        self, text: str, icon: QtGui.QIcon | None = None
     ) -> None:
-        # Get the action index
-        index = len(self.actions)
-
         # Get the actions
         actions = self.toolbar.actions()
 
@@ -88,47 +69,29 @@ class SpectrumViewer(MainWindow):
             action = QtGui.QAction(text, self)
 
         action.setCheckable(True)
-        action.setChecked(self.calc_options[index])
+        action.setChecked(False)
 
         # Connect the actions to the callback and add to toolbar
-        action.triggered.connect(lambda: self.set_calc_option(index))
+        action.triggered.connect(self.plot)
         self.toolbar.insertAction(actions[-1], action)
-        self.actions.append(action)
+        self.calc_options[text] = action
 
     def plot(self) -> None:
-        # Get the calculation options
-        qeff, bkg, calib, uncertainties = self.calc_options
-
         # Recalculate the spectrum
-        if uncertainties:
-            error_prop = "montecarlo"
+        if self.calc_options["montecarlo"].isChecked:
+            uncertainties = "montecarlo"
 
         else:
-            error_prop = "none"
+            uncertainties = "poisson"
 
-        # Create a progress dialog
-        progress_dialog = QtWidgets.QProgressDialog(
-            "Calculating...", None, 0, 0, self
-        )
-        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.show()
-
-        self.y, self.yerr = self.scan.spectrum_at(
+        y, yerr, xe = self.scan.spectrum_at(
             self.step,
-            self.edges,
-            qeff=qeff,
-            bkg=bkg,
-            calib=calib,
-            err_prop=error_prop,
-            mc_samples=self.mc_samples,
+            self.bins,
+            qeff=self.calc_options["qeff"].isChecked,
+            bkg=self.calc_options["bkg"].isChecked,
+            calib=self.calc_options["calib"].isChecked,
+            uncertainties=uncertainties,
         )
-
-        # Close the progress dialog
-        progress_dialog.close()
-
-        if not uncertainties:
-            self.yerr = None
 
         # Plot the spectrum
         with ageplot.context(["age", "interactive"]):
@@ -136,18 +99,17 @@ class SpectrumViewer(MainWindow):
             self.ax.clear()
 
             # Plot the spectrum
-            self.ax.stairs(self.y, self.edges, color=ageplot.colors[0])
+            self.ax.stairs(y, xe, color=ageplot.colors[0])
 
             # Plot the uncertainties
-            if self.yerr is not None:
-                self.ax.stairs(
-                    self.y + self.yerr,
-                    self.edges,
-                    baseline=self.y - self.yerr,
-                    color=ageplot.colors[0],
-                    alpha=0.5,
-                    fill=True,
-                )
+            self.ax.stairs(
+                y + yerr,
+                xe,
+                baseline=y - yerr,
+                color=ageplot.colors[0],
+                alpha=0.5,
+                fill=True,
+            )
 
             # Refresh the canvas
             self.canvas.draw_idle()
@@ -164,9 +126,4 @@ class SpectrumViewer(MainWindow):
             return
 
         self.step += 1
-        self.plot()
-
-    def set_calc_option(self, index: int) -> None:
-        self.calc_options[index] = self.actions[index].isChecked()
-
         self.plot()
