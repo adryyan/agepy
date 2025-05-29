@@ -1,4 +1,4 @@
-"""Load and process exciting-photon energy scans."""
+"""Load and process exciting-photon energy scans of H2."""
 
 from __future__ import annotations
 
@@ -16,72 +16,108 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Literal, Sequence
-    from numpy.typing import NDArray
+    from numpy.typing import NDArray, ArrayLike
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
-    from agepy.spec.photons.anodes import PositionAnode
-
-    type RegionOfInterest = tuple[tuple[float, float], tuple[float, float]]
-    type QuantumEfficiency = tuple[NDArray, NDArray, NDArray]
-    type WavelengthCalib = tuple[tuple[float, float], tuple[float, float]]
-    type ErrorPropagation = Literal["montecarlo", "none"]
+    from .anodes import PositionAnode
+    from .spectrum import Spectrum
 
 
 class EnergyScan(Scan):
-    """Scan over exciting-photon energies with a spectrum for each step.
+    """Scan over exciting-photon energies with a spectrum for each
+    energy step.
 
     Parameters
     ----------
-    data_files: Sequence[str]
-        List of data files to be processed.
+    data_files: array_like
+        List of data files (str) to be processed.
     anode: PositionAnode
-        Anode object from `agepy.spec.photons`.
+        Anode object to process the raw data.
     energies: str, optional
-        Path to the energy values in the data files. If None,
+        Path to the step values in the data files. If `None`,
         the keys are used as the values.
     raw: str, optional
-        Path to the raw data in the data files. Default:
-        "dld_rd#raw/0".
+        Path to the raw data in the data files.
     time_per_step: int, optional
-        Time per step in the scan. Default: None.
-    roi: tuple[tuple[float, float], tuple[float, float]], optional
+        Time per step in the scan.
+    roi: array_like, shape (2,2), optional
         Region of interest for the detector in the form
-        `((xmin, xmax), (ymin, ymax))`. Default: None.
-    **norm
-        Normalization parameters as keyword arguments with the name as
-        key and the h5 path as the value. For example,
-        `intensity_upstream = mirror#value`.
+        `((xmin, xmax), (ymin, ymax))`.
+    qeff: [np.ndarray, np.ndarray, np.ndarray], optional
+        Detector efficiencies in the form `(values, errors, x)`
+        with shapes (M,).
+    bkg: Spectrum, optional
+        Background spectrum (dark counts) to be subtracted from
+        the spectra.
+    calib: array_like, shape (2,2), optional
+        Wavelength calibration parameters in the form
+        `((a0, err), (a1, err))`, where `a0` and `a1`
+        correspond to $\\lambda = a_1 x + a_0$ and `err` to the
+        respective uncertainties.
+    **normalize: str
+        Path to additional normalization parameters as keyword
+        arguments like the upstream intensity or target density.
 
     Attributes
     ----------
-    spectra: NDArray
+    spectra: np.ndarray, shape (N,)
         Array of the loaded Spectrum objects.
-    energies: NDArray
+    steps: np.ndarray, shape (N,)
         Array of the scan variable values.
+    m_id: np.ndarray, shape (N,)
+        Array of the measurement numbers.
+    roi: np.ndarray, shape (2,2)
+        Region of interest for the detector.
+    qeff: [np.ndarray, np.ndarray, np.ndarray] or None
+        Detector efficiencies in the form `(values, errors, x)`
+        with shapes (M,).
+    bkg: Spectrum or None
+        Background spectrum (dark counts) to be subtracted.
+    calib: np.ndarray, shape (2,2)
+        Wavelength calibration parameters in the form
+        `((a0, err), (a1, err))`, where `a0` and `a1`
+        correspond to $\\lambda = a_1 x + a_0$ and `err` to the
+        respective uncertainties.
 
     """
 
     def __init__(
         self,
-        data_files: Sequence[str],
+        data_files: str | ArrayLike,
         anode: PositionAnode,
-        energy_uncertainty: NDArray | float,
         energies: str | None = None,
         raw: str = "dld_rd#raw",
-        time_per_step: int | Sequence[int] | None = None,
-        roi: RegionOfInterest | None = None,
-        **norm: str,
+        time_per_step: int | ArrayLike | None = None,
+        roi: ArrayLike = ((0, 1), (0, 1)),
+        qeff: tuple[NDArray, NDArray, NDArray] | None = None,
+        bkg: Spectrum | None = None,
+        calib: ArrayLike = ((0, 0), (1, 0)),
+        energy_uncertainty: int | float | ArrayLike = 0,
+        **normalize: str,
     ) -> None:
+        # Load and process data
         super().__init__(
-            data_files, anode, energies, raw, time_per_step, roi, **norm
+            data_files,
+            anode,
+            scan_var=energies,
+            raw=raw,
+            time_per_step=time_per_step,
+            roi=roi,
+            qeff=qeff,
+            bkg=bkg,
+            calib=calib,
+            **normalize,
         )
 
         # Set attributes
         self.energy_uncertainty = energy_uncertainty
-        self._phex_assignments = None
-        self._phex_label = None
-        self._phem_assignments = None
-        self._phem_label = None
+
+        # Create DataFrames for the assignments
+        col = ["J", "Elp", "vp", "Jp", "model", "fit"]
+        self._phex = pd.DataFrame(columns=col)
+
+        col = ["J", "Elp", "vp", "Jp", "vpp", "Jpp", "model", "fit"]
+        self._phem = pd.DataFrame(columns=col)
 
     @property
     def energies(self) -> NDArray:
@@ -96,50 +132,67 @@ class EnergyScan(Scan):
         return self._energy_uncertainty
 
     @energy_uncertainty.setter
-    def energy_uncertainty(self, value: NDArray | float) -> None:
-        if value is None:
-            self._energy_uncertainty = None
-            return
-
-        if isinstance(value, np.ndarray):
-            if value.shape == (len(self.spectra),):
-                self._energy_uncertainty = value
-
-            else:
-                raise ValueError(
-                    "Uncertainties must be of the same length as spectra."
-                )
-
-        elif isinstance(value, (int, float)):
+    def energy_uncertainty(self, value: int | float | ArrayLike) -> None:
+        if isinstance(value, (int, float)):
             self._energy_uncertainty = np.full(
                 len(self._steps), value, dtype=np.float64
             )
 
         else:
-            raise ValueError("Uncertainties must be a numpy array or a float.")
+            value = np.array(value, dtype=np.float64)
+
+            if value.shape == self.steps.shape:
+                self._energy_uncertainty = value
+
+            else:
+                errmsg = "energy_uncertainty must have same length as steps."
+                raise ValueError(errmsg)
 
     def remove_steps(
         self,
-        measurement_number: str,
-        steps: Sequence[int] | Sequence[float],
-    ) -> NDArray:
+        measurement_id: str,
+        steps: ArrayLike,
+    ) -> None:
         """Remove the specified steps of a measurement from the scan.
 
         Parameters
         ----------
-        measurement_number: str
+        measurement_id: str
             Measurement number (metro) to remove the steps from.
-        steps: Union[Sequence[int], Sequence[float]]
+        steps: array_like
             List of step values to remove.
 
         """
-        # Call the base class method
-        mask = super().remove_steps(measurement_number, steps)
+        # Select the spectra corresponding to the measurement number
+        inds = np.argwhere(self.m_id == measurement_id).flatten()
+
+        # Check if the measurement number exists
+        if len(inds) == 0:
+            errmsg = f"No spectra found for m_id {measurement_id}."
+            raise ValueError(errmsg)
+
+        steps = np.array(steps, dtype=np.float64)
+
+        # Select the steps to remove
+        step_inds = []
+        for step in steps:
+            # Select the index of the closest step value
+            step_inds.append(np.argsort(np.abs(self.steps[inds] - step))[0])
+
+        # Check if the steps exist
+        if len(step_inds) == 0:
+            errmsg = f"Steps not found in {measurement_id}."
+            raise ValueError(errmsg)
+
+        inds = inds[step_inds]
+
+        # Remove the steps
+        self._steps = np.delete(self.steps, inds)
+        self._spectra = np.delete(self.spectra, inds)
+        self._id = np.delete(self.id, inds)
 
         # Remove the uncertainties
-        self._energy_uncertainty = np.delete(self._energy_uncertainty, mask)
-
-        return mask
+        self._energy_uncertainty = np.delete(self._energy_uncertainty, inds)
 
     def select_by_phex(
         self,
@@ -389,21 +442,31 @@ class EnergyScan(Scan):
     def assign_phem(
         self,
         reference: pd.DataFrame,
-        label: dict[str, Sequence[str] | int],
-        calib_guess: tuple[float, float],
+        calib: tuple[float, float],
         bins: int = 512,
     ) -> int:
-        from agepy.interactive import get_qapp
-        from agepy.spec.interactive.photons_phem import AssignPhem
+        """Interactively assign transitions to peaks in the
+        fluorescence spectra.
 
-        # Create the bin edges
-        edges = np.histogram([], bins=bins, range=(0, 1))[1]
+        Parameters
+        ----------
+        reference: pd.DataFrame
+            DataFrame containing emission energies in nm with the
+            corresponding transition labels: Elp, vp, Jp, vpp, Jpp.
+        calib: [float, float]
+            Initial guess of the calibration parameters (a0, a1).
+        bins: int or array_like
+            Bin numbers or edges.
+
+        """
+        from agepy.interactive import get_qapp
+        from ._interactive_phem import AssignPhem
 
         # Get the Qt application
         app = get_qapp()
 
         # Intialize the viewer
-        mw = AssignPhem(self, edges, reference, label, calib_guess)
+        mw = AssignPhem(self, reference, calib, bins)
         mw.show()
 
         # Run the application
@@ -411,11 +474,11 @@ class EnergyScan(Scan):
 
     def save_phem(self, path: str) -> None:
         with open(path, "wb") as f:
-            pickle.dump(self._phem_assignments, f)
+            pickle.dump(self._phem, f)
 
     def load_phem(self, path: str) -> None:
         with open(path, "rb") as f:
-            self._phem_assignments = pickle.load(f)
+            self._phem = pickle.load(f)
 
     def eval_phem(
         self,
@@ -590,40 +653,33 @@ class EnergyScan(Scan):
 
     def assigned_spectrum(
         self,
-        phex: dict[str, str | int],
-        edges: NDArray,
-        n_std: float = 1.0,
+        J: int,
+        Elp: str,
+        vp: int,
+        Jp: int,
+        n_std: int | float = 1,
         normalize: bool = False,
-        roi: RegionOfInterest | bool = True,
+        bins: int | ArrayLike = 512,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
-        err_prop: Literal["montecarlo", "none"] = "montecarlo",
+        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
         mc_samples: int = 10000,
-    ) -> tuple[NDArray, NDArray]:
-        """Get the spectrum at a specific step.
+        mc_seed: int | None = None,
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """Get the spectrum from an assigned excitation.
 
         Parameters
         ----------
-        phex: Dict[str, Union[str, int]]
-            Dictionary specifying a photon excitation. The photn
-            excitation needs to be in the assignments made with
-            `EnergyScan.assign_phex`.
-        edges: NDArray
-            Bin edges for the histogram. For a calibrated spectrum,
-            these should be in wavelength units. For an uncalibrated
-            spectrum, these should be between 0 and 1.
-        n_std: float, optional
-            Number of standard deviations of the assignment fit to use
-            for selecting spectra.
-        normalize: bool, optional
-            Whether to normalize the spectra to their excitation.
-            This will increase the uncertainty of the spectrum, because
-            of the excitation fit uncertainty.
-        roi: tuple[tuple[float, float], tuple[float, float]], optional
-            Region of interest for the detector in the form
-            `((xmin, xmax), (ymin, ymax))`. If not provided, the
-            full detector is used.
+        step: int or float or str
+            Step value to get the spectrum for. The value is
+            converted to float and the closest step value
+            is used.
+        bins: int or array_like, optional
+            Bin number or edges for the histogram. For a calibrated
+            spectrum, these edges should be in wavelength units.
+            For an uncalibrated spectrum, these should be between
+            0 and 1.
         qeff: bool, optional
             Whether to apply the spatial detector efficiencies if
             available.
@@ -631,23 +687,27 @@ class EnergyScan(Scan):
             Whether to subtract the background spectrum if available.
         calib: bool, optional
             Whether to apply the wavelength calibration if available.
-        err_prop: Literal["montecarlo", "none"], optional
+        uncertainties: Literal["montecarlo", "poisson"], optional
             Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration. If
-            `qeff = None` and `calib = None` and `bkg = None`, this
-            setting has no effect. Can be 'montecarlo', or 'none'.
+            the efficiencies and the wavelength calibration.
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
-            Has no effect if `err_prop = 'none'`.
+        mc_seed: int, optional
+            Seed for the NumPy random generator.
 
         Returns
         -------
-        tuple[NDArray, NDArray]
-            The spectrum and its uncertainties.
+        spec: np.array, shape (N,)
+            The (normalized) bin counts.
+        err: np.array, shape (N,)
+            The uncertainties of the bin counts propagated depending
+            on the `uncertainties` argument.
+        edges: np.array, shape (N+1,)
+            The bin edges.
 
         """
         # Find the phex assignment
-        phex_idx, step_idx = self.select_by_phex(phex, n_std)
+        phex_idx, step_idx = self.select_by_phex(J, Elp, vp, Jp, n_std=n_std)
 
         if len(step_idx) == 0:
             wrnmsg = "Trying with 2 * n_std."

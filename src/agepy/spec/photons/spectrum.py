@@ -392,7 +392,7 @@ class Spectrum:
 
     def spectrum(
         self,
-        bins: int | ArrayLike,
+        bins: int | ArrayLike = 512,
         roi: ArrayLike = ((0, 1), (0, 1)),
         qeff: tuple[NDArray, NDArray, NDArray] | None = None,
         bkg: Spectrum | None = None,
@@ -400,13 +400,13 @@ class Spectrum:
         uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
         mc_samples: int = 10000,
         mc_seed: int | None = None,
-    ) -> tuple[NDArray, NDArray]:
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
 
         Parameters
         ----------
-        bins: int or array_like
+        bins: int or array_like, optional
             Bin number or edges for the histogram. For a calibrated
             spectrum, bin edges should be in wavelength units.
             For an uncalibrated spectrum, these should be between

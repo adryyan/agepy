@@ -603,7 +603,7 @@ class Scan(BaseScan):
     def spectrum_at(
         self,
         idx: int,
-        bins: int | ArrayLike,
+        bins: int | ArrayLike = 512,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
@@ -617,7 +617,7 @@ class Scan(BaseScan):
         ----------
         idx: int
             Index of the step to get the spectrum for.
-        bins: int or array_like
+        bins: int or array_like, optional
             Bin number or edges for the histogram. For a calibrated
             spectrum, these edges should be in wavelength units.
             For an uncalibrated spectrum, these should be between
@@ -660,7 +660,7 @@ class Scan(BaseScan):
 
         # Calculate the spectrum at the specified index
         return self.spectra[idx].spectrum(
-            bins,
+            bins=bins,
             roi=self.roi,
             qeff=qeff,
             bkg=bkg,
@@ -673,7 +673,7 @@ class Scan(BaseScan):
     def spectrum_at_step(
         self,
         step: int | float | str,
-        bins: int | ArrayLike,
+        bins: int | ArrayLike = 512,
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
@@ -689,7 +689,7 @@ class Scan(BaseScan):
             Step value to get the spectrum for. The value is
             converted to float and the closest step value
             is used.
-        bins: int or array_like
+        bins: int or array_like, optional
             Bin number or edges for the histogram. For a calibrated
             spectrum, these edges should be in wavelength units.
             For an uncalibrated spectrum, these should be between
@@ -725,7 +725,7 @@ class Scan(BaseScan):
 
         return self.spectrum_at(
             idx,
-            bins,
+            bins=bins,
             qeff=qeff,
             bkg=bkg,
             calib=calib,
@@ -740,11 +740,15 @@ class Scan(BaseScan):
         PySide6 or PyQt6 needs to be installed for this to work.
 
         """
-        from agepy.interactive import run
+        from agepy.interactive import get_qapp
         from ._interactive_scan import SpectrumViewer
+
+        # Get the Qt application
+        app = get_qapp()
 
         # Intialize the viewer
         mw = SpectrumViewer(self)
+        mw.show()
 
         # Run the application
-        run(mw)
+        return app.exec()
