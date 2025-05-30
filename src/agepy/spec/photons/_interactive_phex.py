@@ -10,14 +10,13 @@ except ImportError as e:
 try:
     from iminuit import Minuit, cost
     from iminuit.qtwidget import make_widget
-    from numba_stats import norm
+    from numba_stats import norm, uniform
 
 except ImportError as e:
     errmsg = "iminuit and numba_stats required for fitting."
     raise ImportError(errmsg) from e
 
 import numpy as np
-import numba as nb
 from jacobi import propagate
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,7 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
-    from numpy.typing import NDArray
+    from numpy.typing import NDArray, ArrayLike
     from .energy_scan import EnergyScan
 
 
@@ -207,56 +206,30 @@ class AssignPhex(MainWindow):
         val_start2 = {}
 
         # Get the assignments
-        dialog = AssignmentDialog(self, self.label, title="Assign Peak I")
+        dialog = AssignmentDialog(self, self.aqn, title="Assign Peak I")
         if dialog.exec():
-            exc1 = dialog.get_input()
+            phex1 = dialog.get_input()
+            phex1_index = str(phex1["J"]) + "," + phex1["Elp"] + ","
+            phex1_index += str(phex1["vp"]) + "," + str(phex1["Jp"])
 
-            # Find the index where to save the assignment
-            df = self.scan._phex_assignments.copy()
-            for l, val in exc1.items():
-                if df.empty:
-                    break
-
-                df.query(f"{l} == @val", inplace=True)
-
-            if df.empty:
-                idx1 = self.scan._phex_assignments.index.max()
-                if np.isnan(idx1):
-                    idx1 = 0
-
-                else:
-                    idx1 += 1
-
-            else:
-                idx1 = df.index[0]
-
+            if phex1_index in self.scan._phex.index:
                 # Get the starting values
-                val_start1 = df["val"].iloc[0]
+                val_start1 = self.scan._phex.loc[phex1_index]["fit"]
                 val_start1 = dict(zip(["s1", "loc1", "scale1"], val_start1))
 
         else:
             return
 
-        dialog = AssignmentDialog(self, self.label, title="Assign Peak II")
+        dialog = AssignmentDialog(self, self.aqn, title="Assign Peak II")
+
         if dialog.exec():
-            exc2 = dialog.get_input()
+            phex2 = dialog.get_input()
+            phex2_index = str(phex2["J"]) + "," + phex2["Elp"] + ","
+            phex2_index += str(phex2["vp"]) + "," + str(phex2["Jp"])
 
-            # Find the index where to save the assignment
-            df = self.scan._phex_assignments.copy()
-            for l, val in exc2.items():
-                if df.empty:
-                    break
-
-                df = df.query(f"{l} == @val")
-
-            if df.empty:
-                idx2 = idx1 + 1
-
-            else:
-                idx2 = df.index[0]
-
+            if phex2_index in self.scan._phex.index:
                 # Get the starting values
-                val_start2 = df["val"].iloc[0]
+                val_start2 = self.scan._phex.loc[phex1_index]["fit"]
                 val_start2[1] -= val_start1["loc1"]
                 val_start2 = {
                     "s2": val_start2[0],
@@ -265,20 +238,22 @@ class AssignPhex(MainWindow):
 
             # Prepare constraint of the energy difference
             E1 = self.reference.copy()
-            for l, val in exc1.items():
-                query_str = f"{l} == @val"
+            for q, val in phex1.items():  # noqa B007
+                query_str = f"{q} == @val"
                 E1.query(query_str, inplace=True)
 
             E2 = self.reference.copy()
-            for l, val in exc2.items():
-                query_str = f"{l} == @val"
+            for q, val in phex2.items():  # noqa B007
+                query_str = f"{q} == @val"
                 E2.query(query_str, inplace=True)
 
             if E1.empty or E2.empty:
                 constraint = None
 
             else:
-                diff = np.abs(E2["E"].iloc[0] - E1["E"].iloc[0])
+                diff = np.abs(
+                    E2["exc_energy"].iloc[0] - E1["exc_energy"].iloc[0]
+                )
                 constraint = (diff, np.mean(xerr) * 2)
 
             debug_fit = InteractiveFit(
@@ -295,7 +270,7 @@ class AssignPhex(MainWindow):
             )
 
         else:
-            exc2 = None
+            phex2 = None
             debug_fit = InteractiveFit(
                 self,
                 y,
@@ -309,38 +284,27 @@ class AssignPhex(MainWindow):
 
         # Fit the data
         if debug_fit.exec():
-            m = debug_fit.m
+            # Get the fit results
+            res1, res2 = debug_fit.fit_result()
+
+            # Don't save the assignment if the fit failed
+            if res1 is None:
+                return
 
             # Create the new row
-            exc1["E"] = float(m.values["loc1"])
-            exc1["val"] = np.array(m.values["s1", "loc1", "scale1"])
-            exc1["err"] = np.array(m.errors["s1", "loc1", "scale1"])
+            phex1["fit"] = res1
+            phex1["exc_energy"] = res1.val[1]
 
             # Save the assignment
-            self.scan._phex_assignments.loc[idx1] = exc1
+            self.scan._phex.loc[phex1_index] = phex1
 
-            # Process the second assignment
-            if exc2 is not None:
+            if phex2 is not None and res2 is not None:
                 # Create the new row
-                cov = np.array(m.covariance)
-                inds = [m.parameters.index(p) for p in ["loc1", "loc2_loc1"]]
-                cov = cov[np.ix_(inds, inds)]
-                loc2, loc2err = propagate(
-                    lambda par: par[0] + par[1],
-                    m.values["loc1", "loc2_loc1"],
-                    cov,
-                )
-
-                exc2["E"] = loc2
-                exc2["val"] = np.array(
-                    [m.values["s2"], loc2, m.values["scale1"]]
-                )
-                exc2["err"] = np.array(
-                    [m.errors["s2"], loc2err, m.errors["scale1"]]
-                )
+                phex2["fit"] = res2
+                phex2["exc_energy"] = res2.val[1]
 
                 # Save the assignment
-                self.scan._phex_assignments.loc[idx2] = exc2
+                self.scan._phex.loc[phex2_index] = phex2
 
             # Close pyplot figures
             plt.close("all")
@@ -350,6 +314,15 @@ class AssignPhex(MainWindow):
 
 
 class InteractiveFit(QtWidgets.QDialog):
+    sig_models = {
+        "Gaussian": lambda xr: Gaussian(xr),
+    }
+
+    bkg_models = {
+        "None": None,
+        "Constant": lambda xr: Constant(xr),
+    }
+
     def __init__(
         self,
         parent: QtWidgets.QWidget,
@@ -357,10 +330,10 @@ class InteractiveFit(QtWidgets.QDialog):
         yerr: NDArray,
         x: NDArray,
         xerr: NDArray,
-        sig: Union[str, Tuple[str, str]] = "Gaussian",
+        sig1: str | FitModel = "Gaussian",
+        sig2: str | FitModel = "Gaussian",
         bkg: str = "Constant",
-        constrain_dE: Tuple[float, float] = None,
-        **start_values,
+        constraint: tuple[float, float] | None = None,
     ) -> None:
         # Initialize fit data
         self.y = y
@@ -374,30 +347,26 @@ class InteractiveFit(QtWidgets.QDialog):
         # Define starting values and limits
         self.s_start = np.max(y) * (x[1] - x[0])
         self.s_limit = np.max(y) * (x[1] - x[0]) * 5
-        self.start_values = start_values
 
         # Set the constraint
-        self.constrain_dE = constrain_dE
+        self.constraint = constraint
 
-        # Initialize the list of available models
-        self._init_model_list()
-
-        # Check the signal and background models
-        if isinstance(sig, str):
-            if sig not in self.sig_models.keys():
-                raise ValueError(f"Signal model {sig} not found.")
-
-            sig = [sig, "None"]
+        # Set signal and background models
+        if isinstance(sig1, FitModel):
+            self.sig1 = sig1
+            sig1 = self.sig1.name
 
         else:
-            if sig[0] not in self.sig_models.keys():
-                raise ValueError(f"Signal model {sig[0]} not found.")
+            self.sig1 = None
 
-            if sig[1] not in list(self.sig_models.keys()) + ["None"]:
-                raise ValueError(f"Signal model {sig[1]} not found.")
+        if isinstance(sig2, FitModel):
+            self.sig2 = sig2
+            sig2 = self.sig2.name
 
-        if bkg not in self.bkg_models.keys():
-            raise ValueError(f"Background model {bkg} not found.")
+        else:
+            self.sig2 = None
+
+        self.bkg = None
 
         # Initialize the parameters
         self.params = {}
@@ -429,20 +398,18 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Create ComboBox for the first signal component
         self.sig_comp1 = QtWidgets.QComboBox()
-        self.sig_comp1.setSizePolicy(size_policy)
         self.sig_comp1.addItems(self.sig_models.keys())
         self.sig_comp1.setCurrentIndex(
-            list(self.sig_models.keys()).index(sig[0])
+            list(self.sig_models.keys()).index(sig1)
         )
         self.sig_comp1.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp1)
 
         # Create ComboBox for the second signal component
         self.sig_comp2 = QtWidgets.QComboBox()
-        self.sig_comp2.setSizePolicy(size_policy)
         self.sig_comp2.addItems(list(self.sig_models.keys()) + ["None"])
         self.sig_comp2.setCurrentIndex(
-            (list(self.sig_models.keys()) + ["None"]).index(sig[1])
+            (list(self.sig_models.keys()) + ["None"]).index(sig2)
         )
         self.sig_comp2.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp2)
@@ -454,7 +421,6 @@ class InteractiveFit(QtWidgets.QDialog):
         self.background_group.setSizePolicy(size_policy)
         self.background_layout = QtWidgets.QHBoxLayout(self.background_group)
         self.bkg_comp = QtWidgets.QComboBox()
-        self.bkg_comp.setSizePolicy(size_policy)
         self.bkg_comp.addItems(self.bkg_models.keys())
         self.bkg_comp.setCurrentIndex(list(self.bkg_models.keys()).index(bkg))
         self.bkg_comp.currentIndexChanged.connect(self.prepare_fit)
@@ -477,8 +443,8 @@ class InteractiveFit(QtWidgets.QDialog):
             QtWidgets.QDialogButtonBox.StandardButton.Cancel
             | QtWidgets.QDialogButtonBox.StandardButton.Ok
         )
-        self.button_box.accepted.connect(self.accept)  # type: ignore
-        self.button_box.rejected.connect(self.reject)  # type: ignore
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
         QtCore.QMetaObject.connectSlotsByName(self)
         self.button_layout.addWidget(self.button_box)
         self.layout.addWidget(
@@ -497,68 +463,134 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.setColumnStretch(3, 0)  # Button group column
 
         # Create the initial fit widget
-        self.prepare_fit()
+        self.prepare_fit(sig1=self.sig1, sig2=self.sig2)
 
-    def update_fit_widget(self, widget) -> None:
+    def update_fit_widget(self, widget: QtWidgets.QWidget) -> None:
         # Remove the old fit widget
         self.layout.removeWidget(widget)
         # Set the new fit widget
         self.fit_widget = widget
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 4)
 
-    def prepare_fit(self) -> None:
+    def prepare_fit(
+        self, sig1: FitModel | None = None, sig2: FitModel | None = None
+    ) -> None:
+        # Get the selected signal and background models
+        if sig1 is None:
+            sig1 = self.sig_comp1.currentText()
+            self.sig1 = self.sig_models[sig1](self.xr)
+            dloc1 = 0.1 * (self.xr[1] - self.xr[0])
+
+        else:
+            sig1.xr = self.xr
+            dloc1 = 0
+
+        if sig2 is None:
+            sig2 = self.sig_comp2.currentText()
+
+            if sig2 == "None":
+                self.sig2 = None
+
+            else:
+                self.sig2 = self.sig_models[sig2](self.xr)
+                dloc2 = 0.1 * (self.xr[1] - self.xr[0])
+
+        else:
+            sig2.xr = self.xr
+            dloc2 = 0
+
+        bkg = self.bkg_comp.currentText()
+
+        if bkg != "None":
+            bkg = self.bkg_models[bkg](self.xr)
+
         # Remember current parameters and limits
         params_prev = self.params.copy()
 
-        #
-        nconstraint = None
+        # Get the first signal model, starting values and limits
+        par1 = self.sig1.start_val(self.s_start)
+        lim1 = self.sig1.limits(self.s_limit)
 
-        # Get the model and derivative
-        if self.sig_comp2.currentText() == "None":
-            model, derivative, self.params, limits = self.gaussian()
+        # Append a 1 to the parameter names
+        self.params = {f"{k}1": v for k, v in par1.items()}
+        limits = {f"{k}1": v for k, v in lim1.items()}
 
-        else:
-            model, derivative, self.params, limits = (
-                self.constrained_gaussians()
-            )
+        n1 = len(par1)
+        n2 = 0
+        n3 = 0
 
-            # Define the constraint if available
-            if self.constrain_dE is not None:
-                nconstraint = cost.NormalConstraint(
-                    "loc2_loc1", *self.constrain_dE
-                )
+        if sig2 != "None":
+            # Get the model and parameters of the second signal component
+            par2 = self.sig2.start_val(self.s_start)
+            lim2 = self.sig2.limits(self.s_limit)
 
-        # Overwrite with given starting values
-        for par, val in self.start_values.items():
-            if par in self.params:
-                self.params[par] = val
+            # Append a 2 to the parameter names
+            par2 = {f"{k}2": v for k, v in par2.items()}
+            lim2 = {f"{k}2": v for k, v in lim2.items()}
 
-        # Keep previous parameters values
+            # Shift loc1
+            self.params["loc1"] -= dloc1
+
+            # Convert loc2 to (loc2 - loc1)
+            par2["loc2"] = par2["loc2"] - self.params["loc1"] + dloc2
+            lim2["loc2"] = (0, self.xr[1] - self.xr[0])
+
+            # Combine the parameters and limits
+            self.params = {**self.params, **par2}
+            limits = {**limits, **lim2}
+
+            n2 = len(par2)
+
+        if bkg != "None":
+            # Get the background model and parameters
+            par3 = bkg.start_val()
+            lim3 = bkg.limits()
+
+            # Combine the parameters and limits
+            self.params = {**self.params, **par3}
+            limits = {**limits, **lim3}
+
+            n3 = len(par3)
+
+        def model(x, args):
+            y = self.sig1.pdf(x, args[:n1])
+
+            if n2 > 0:
+                y += self.sig2.pdf(x, args[n1 : n2 + n1])
+
+            if n3 > 0:
+                y += self.bkg.pdf(x, args[n1 + n2 :])
+
+            return y
+
+        def derivative(x, args):
+            dy = self.sig1.der(x, args[:n1])
+
+            if n2 > 0:
+                dy += self.sig2.der(x, args[n1 : n1 + n2])
+
+            return dy
+
+        # Keep previous parameters and limits if possible
         for par in params_prev:
             if par in self.params:
                 self.params[par] = self.m.values[par]
 
-        # Define the cost function
-        x = self.x
-        xerr = self.xerr
-        y = self.y
-        yerr = self.yerr
-
-        @nb.njit
         def _cost(par):
-            y_var = yerr**2 + (derivative(x, *par) * xerr) ** 2
-            result = np.sum((y - model(x, *par)) ** 2 / y_var)
+            y_var = self.yerr**2 + (derivative(self.x, par) * self.xerr) ** 2
+            result = np.sum((self.y - model(self.x, par)) ** 2 / y_var)
+
             return result
 
         class LeastSquaresXY(cost.LeastSquares):
-            def _value(self, args: Sequence[float]) -> float:
+            def _value(self, args: ArrayLike) -> float:
                 return _cost(args)
 
         # Update the cost function
-        if nconstraint is None:
-            c = LeastSquaresXY(self.x, self.y, self.yerr, model)
-        else:
-            c = LeastSquaresXY(self.x, self.y, self.yerr, model) + nconstraint
+        c = LeastSquaresXY(self.x, self.y, self.yerr, model)
+
+        if self.constraint is not None and sig2 != "None":
+            c += cost.NormalConstraint("loc2", *self.constraint)
 
         # Update the Minuit object
         self.m = Minuit(
@@ -574,7 +606,7 @@ class InteractiveFit(QtWidgets.QDialog):
                 self.x, self.y, yerr=self.yerr, xerr=self.xerr, fmt="ok"
             )
             x = np.linspace(self.xr[0], self.xr[1], 1000)
-            plt.plot(x, model(x, *args))
+            plt.plot(x, model(x, args))
 
         # Update the fit widget
         fit_widget = make_widget(self.m, plot, {}, False, False)
@@ -585,74 +617,117 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def _init_model_list(self) -> None:
-        self.sig_models = {
-            "Gaussian": self.gaussian,
-        }
-        self.bkg_models = {
-            "Constant": None,
-        }
+    def fit_result(self) -> tuple[FitModel | None, FitModel | None]:
+        if not self.m.valid:
+            return None, None
 
-    def gaussian(self) -> Tuple[callable, callable, dict, dict]:
+        # Get the covariance matrix
+        cov = np.array(self.m.covariance)
+
+        # Append 1 to the parameter names
+        par1 = [f"{k}1" for k in self.sig1.par]
+
+        # Get fitted parameter values and uncertainties
+        self.sig1.val = np.array(self.m.values[par1])
+        self.sig1.err = np.array(self.m.errors[par1])
+
+        # Get the covariance matrix for sig1
+        self.sig1.cov = cov[: len(par1), : len(par1)].copy()
+
+        if self.sig2 is None:
+            return self.sig1, None
+
+        # Append 2 to the parameter names
+        par2 = [f"{k}2" for k in self.sig2.par]
+
+        # Get fitted parameter values and uncertainties
+        self.sig2.val = np.array(self.m.values[par2])
+        self.sig2.err = np.array(self.m.errors[par2])
+
+        # Add loc1 to loc2
+        idx1 = par1.index("loc1")
+        idx2 = par2.index("loc2")
+        val = [self.sig1.val[idx1], self.sig2.val[idx2]]
+        cov = cov[np.ix_([idx1, idx2], [idx1, idx2])]
+
+        loc2, loc2err = propagate(lambda x: x[0] + x[1], val, cov)
+
+        self.sig2.val[idx2] = loc2
+        self.sig2.err[idx2] = np.sqrt(loc2err)
+        self.sig2.cov = self.sig2.err**2
+
+        return self.sig1, self.sig2
+
+
+class FitModel:
+    def __init__(
+        self,
+        xr: tuple[float, float],
+    ) -> None:
+        self.xr = xr
+
+        # Fit results
+        self.val = None
+        self.err = None
+        self.cov = None
+
+    def __call__(self, x: NDArray) -> tuple[NDArray, NDArray]:
+        if self.cov is None:
+            raise ValueError("Fit results are not available.")
+
+        # Propagate the uncertainties
+        y, yerr = propagate(lambda par: self.pdf(x, par), self.val, self.cov)
+
+        return y, np.sqrt(np.diag(yerr))
+
+    def start_val(self, n):
+        if self.val is not None:
+            return {k: v for k, v in zip(self.par, self.val)}
+
+        else:
+            return self._start_val(n)
+
+
+class Gaussian(FitModel):
+    name = "Gaussian"
+    par = ["s", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * norm.pdf(x, *par[1:])
+
+    @staticmethod
+    def der(x, par):
+        return -par[0] * norm.pdf(x, *par[1:]) * (x - par[1]) / par[2] ** 2
+
+    def limits(self, n_max):
         dx = self.xr[1] - self.xr[0]
-        params = {
-            "s1": self.s_start,
-            "loc1": self.xr[0] + 0.5 * dx,
-            "scale1": 0.1 * dx,
-            "b": self.x[1] - self.x[0],
-        }
-        limits = {
-            "s1": (0, self.s_limit),
-            "loc1": self.xr,
-            "scale1": (0.0001 * dx, 0.5 * dx),
-            "b": (0, None),
+
+        return {
+            "s": (0, n_max),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
         }
 
-        @nb.njit
-        def model(x, s1, loc1, scale1, b):
-            return s1 * norm.pdf(x, loc1, scale1) + b
-
-        @nb.njit
-        def derivative(x, s1, loc1, scale1, b):
-            return -s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
-
-        return model, derivative, params, limits
-
-    def constrained_gaussians(self) -> Tuple[callable, callable, dict, dict]:
-        dx = self.xr[1] - self.xr[0]
-        params = {
-            "s1": self.s_start,
-            "s2": self.s_start,
-            "loc1": self.xr[0] + 0.35 * dx,
-            "loc2_loc1": 0.35 * dx,
-            "scale1": 0.1 * dx,
-            "b": self.x[1] - self.x[0],
-        }
-        limits = {
-            "s1": (0, self.s_limit),
-            "s2": (0, self.s_limit),
-            "loc1": self.xr,
-            "loc2_loc1": (0, dx),
-            "scale1": (0.0001 * dx, 0.5 * dx),
-            "b": (0, None),
+    def _start_val(self, n):
+        return {
+            "s": n,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
         }
 
-        @nb.njit
-        def model(x, s1, s2, loc1, loc2_loc1, scale1, b):
-            return (
-                s1 * norm.pdf(x, loc1, scale1)
-                + s2 * norm.pdf(x, loc1 + loc2_loc1, scale1)
-                + b
-            )
 
-        @nb.njit
-        def derivative(x, s1, s2, loc1, loc2_loc1, scale1, b):
-            return (
-                -s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
-                - s2
-                * norm.pdf(x, loc1 + loc2_loc1, scale1)
-                * (x - loc1 - loc2_loc1)
-                / scale1**2
-            )
+class Constant(FitModel):
+    par = ["b"]
 
-        return model, derivative, params, limits
+    def pdf(self, x, par):
+        return par[0] * uniform.pdf(x, self.xr[0], self.xr[1] - self.xr[0])
+
+    def der(self, x, par):
+        return np.zeros_like(x)
+
+    def limits(self):
+        return {"b": (0, None)}
+
+    def start_val(self):
+        return {"b": 1}

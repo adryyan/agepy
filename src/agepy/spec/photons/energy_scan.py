@@ -5,8 +5,6 @@ from __future__ import annotations
 import warnings
 import pickle
 import numpy as np
-from scipy.stats import norm
-from jacobi import propagate
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -15,7 +13,7 @@ from .scan import Scan
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Literal, Sequence
+    from typing import Literal
     from numpy.typing import NDArray, ArrayLike
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
@@ -199,52 +197,52 @@ class EnergyScan(Scan):
 
     def select_by_phex(
         self,
-        phex: dict[str, str | int],
+        J: int,
+        Elp: str,
+        vp: int,
+        Jp: int,
         n_std: int = 1,
         ignore_overlap: bool = False,
-    ) -> tuple[int, NDArray]:
+    ) -> NDArray:
+        # Parse the quantum numbers
+        idx = f"{J},{Elp},{vp},{Jp}"
+
         # Find the phex assignment
-        df = self._phex_assignments.copy()
-        for key, value in phex.items():  # noqa B007
-            df.query(f"{key} == @value", inplace=True)
+        if idx not in self._phex.index:
+            errmsg = "phex assignment not found."
+            raise ValueError(errmsg)
 
-            # Check if there are matching assignments
-            if df.empty:
-                raise ValueError("Phex assignment not found.")
-
-        # At this point there should be only one assignment
-        assert len(df) == 1, "Multiple or no assignments found."
+        phex = self._phex.loc[idx]
 
         # Get the fit results
-        fit_val = df["val"].iloc[0]
+        fit = phex["fit"]
 
         # Select energy steps within n_std standard deviations of the mean
         step_idx = np.argwhere(
-            np.abs(self.steps - fit_val[1]) < fit_val[2] * n_std
+            np.abs(self.steps - fit.val[1]) < fit.val[2] * n_std
         ).flatten()
 
         # Check if steps were found
         if len(step_idx) == 0 or ignore_overlap:
-            return df.index[0], step_idx
+            return step_idx
 
         # Define energy range
         e_range = (  # noqa F841
-            fit_val[1] - fit_val[2] * n_std,
-            fit_val[1] + fit_val[2] * n_std,
+            fit.val[1] - fit.val[2] * n_std,
+            fit.val[1] + fit.val[2] * n_std,
         )
 
         # Check if multiple phex assignments overlap
-        overlap = self._phex_assignments.query(
-            "E > @e_range[0] and E < @e_range[1]"
+        overlap = self._phex.query(
+            "exc_energy > @e_range[0] and exc_energy < @e_range[1]"
         )
 
-        for i, row in overlap.iterrows():
-            if i == df.index[0]:
+        for row in overlap.itertuples():
+            if row["Index"] == idx:
                 continue
 
-            overlap_val = row["val"]
             overlap_idx = np.argwhere(
-                np.abs(self.steps - overlap_val[1]) < overlap_val[2]
+                np.abs(self.steps - row["fit"].val[1]) < row["fit"].val[2]
             ).flatten()
 
             # Remove the overlapping steps
@@ -258,7 +256,7 @@ class EnergyScan(Scan):
             else:
                 step_idx = overlap_idx
 
-        return df.index[0], step_idx
+        return step_idx
 
     def assign_phex(
         self,
@@ -720,72 +718,71 @@ class EnergyScan(Scan):
             The bin edges.
 
         """
+        # Get the number of bins
+        if isinstance(bins, int):
+            nbins = bins
+
+        else:
+            bins = np.asarray(bins, dtype=np.float64)
+            nbins = bins.shape[0] - 1
+
+        # Initialize arrays for the summed spectrum
+        spec = np.zeros(nbins)
+        err = np.zeros(nbins)
+
         # Find the phex assignment
-        phex_idx, step_idx = self.select_by_phex(J, Elp, vp, Jp, n_std=n_std)
+        step_idx = self.select_by_phex(J, Elp, vp, Jp, n_std=n_std)
 
         if len(step_idx) == 0:
             wrnmsg = "Trying with 2 * n_std."
             warnings.warn(wrnmsg, stacklevel=1)
-            phex_idx, step_idx = self.select_by_phex(phex, 2 * n_std)
+            phex_idx, step_idx = self.select_by_phex(J, Elp, vp, Jp, 2 * n_std)
 
         if len(step_idx) == 0:
             wrnmsg = "Ignore overlapping assignments."
             warnings.warn(wrnmsg, stacklevel=1)
             phex_idx, step_idx = self.select_by_phex(
-                phex, n_std, ignore_overlap=True
+                J, Elp, vp, Jp, n_std, ignore_overlap=True
             )
 
         if len(step_idx) == 0:
             wrnmsg = "No steps found for the given photon excitation."
             warnings.warn(wrnmsg, stacklevel=1)
-            return np.zeros(len(edges) - 1), np.zeros(len(edges) - 1)
+            return spec, err, np.arange(nbins + 1) / (nbins + 1)
 
         # Get the fit results
-        fit_val = self._phex_assignments.loc[phex_idx, "val"]
-        fit_err = self._phex_assignments.loc[phex_idx, "err"]
-
-        # Initialize arrays for the summed spectrum
-        spectrum = np.zeros(len(edges) - 1)
-        errors = np.zeros(len(edges) - 1)
+        phex_idx = f"{J},{Elp},{vp},{Jp}"
+        fit = self._phex.loc[phex_idx]["fit"]
 
         # Combine the spectra
         for idx in step_idx:
             # Calculate the spectrum
-            spec, err = self.spectrum_at(
+            spec_, err_, xe = self.spectrum_at(
                 idx,
-                edges,
-                roi=roi,
+                bins=bins,
                 qeff=qeff,
                 bkg=bkg,
                 calib=calib,
-                err_prop=err_prop,
+                uncertainties=uncertainties,
                 mc_samples=mc_samples,
+                mc_seed=mc_seed,
             )
 
             # Normalize with the excitation fit results
             if normalize:
-                # Define function for evaluating the excitation
-                def calc_exc(par):
-                    y = norm.pdf(self.steps[idx], par[0], par[1])  # noqa: B023
-                    y_max = norm.pdf(par[0], par[0], par[1])
-                    return y / y_max
-
                 # Evaluate the excitation at the step value
-                exc, exc_err = propagate(
-                    calc_exc, fit_val[1:], fit_err[1:] ** 2
-                )
-                exc_err = np.sqrt(exc_err)
+                exc, exc_err = fit(self.steps[idx])
 
                 # Normalize the spectrum
-                spec /= exc
-                err = np.sqrt(err**2 / exc**2 + spec**2 * exc_err**2 / exc**4)
+                spec_ /= exc
+                err_ = np.sqrt(err**2 / exc**2 + spec**2 * exc_err**2 / exc**4)
 
             # Add the spectrum to the sum
-            spectrum += spec
-            errors += err**2
+            spec += spec_
+            err += err_**2
 
         # Get Gaussian error (currently correlations are not considered)
-        errors = np.sqrt(errors)
+        err = np.sqrt(err)
 
         # Normalize to the number of summed spectra
         if normalize:
@@ -793,7 +790,7 @@ class EnergyScan(Scan):
             err /= len(step_idx)
 
         # Return the summed spectrum
-        return spectrum, errors
+        return spec, err, xe
 
     def phexphem(
         self,

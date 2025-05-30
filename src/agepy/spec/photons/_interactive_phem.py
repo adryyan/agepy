@@ -269,9 +269,6 @@ class AssignPhem(SpectrumViewer):
                 str(phem1_input["vpp"]) + "," + str(phem1_input["Jpp"])
             )
 
-            # Define starting values
-            start_values = {}
-
             # Set the default signal model
             sig1_model = "Voigt"
             sig2_model = "None"
@@ -284,11 +281,7 @@ class AssignPhem(SpectrumViewer):
 
             else:
                 phem1 = phem1.to_dict()
-
-                # Get the model and starting values
-                sig1_model = phem1["fit"].name
-                start_values = phem1["fit"].start_val(1)
-                start_values = {f"{k}1": v for k, v in start_values.items()}
+                sig1_model = phem1["fit"]
 
         else:
             return
@@ -313,12 +306,7 @@ class AssignPhem(SpectrumViewer):
 
             else:
                 phem2 = phem2.to_dict()
-
-                # Get the model and starting values
-                sig2_model = phem2["fit"].name
-                sv2 = phem2["fit"].start_val(1)
-                sv2 = {f"{k}2": v for k, v in sv2.items()}
-                start_values = {**start_values, **sv2}
+                sig2_model = phem2["fit"]
 
         else:
             phem2 = None
@@ -329,7 +317,6 @@ class AssignPhem(SpectrumViewer):
             xe,
             sig=[sig1_model, sig2_model],
             bkg="Constant",
-            **start_values,
         )
 
         # Fit the data
@@ -386,9 +373,8 @@ class InteractiveFit(QtWidgets.QDialog):
         parent: QtWidgets.QWidget,
         n: NDArray,
         xe: NDArray,
-        sig: str | tuple[str, str] = "Gaussian",
-        bkg: str = "None",
-        **start_values,
+        sig: tuple[str | FitModel, str | FitModel] = ["Voigt", "Voigt"],
+        bkg: str = "Constant",
     ) -> None:
         # Initialize fit data
         self.n = n
@@ -401,28 +387,22 @@ class InteractiveFit(QtWidgets.QDialog):
         nsum = np.sum(n[:, 0])
         self.s_start = nsum * 0.9
         self.s_limit = nsum * 1.1
-        self.start_values = start_values
-
-        # Check the signal and background models
-        if isinstance(sig, str):
-            if sig not in self.sig_models.keys():
-                raise ValueError(f"Signal model {sig} not found.")
-
-            sig = [sig, "None"]
-
-        else:
-            if sig[0] not in self.sig_models.keys():
-                raise ValueError(f"Signal model {sig[0]} not found.")
-
-            if sig[1] not in list(self.sig_models.keys()) + ["None"]:
-                raise ValueError(f"Signal model {sig[1]} not found.")
-
-        if bkg not in self.bkg_models.keys():
-            raise ValueError(f"Background model {bkg} not found.")
 
         # Set signal and background models
-        self.sig1 = None
-        self.sig2 = None
+        if isinstance(sig[0], FitModel):
+            self.sig1 = sig[0]
+            sig[0] = self.sig1.name
+
+        else:
+            self.sig1 = None
+
+        if isinstance(sig[1], FitModel):
+            self.sig2 = sig[1]
+            sig[1] = self.sig2.name
+
+        else:
+            self.sig2 = None
+
         self.bkg = None
 
         # Initialize the parameters
@@ -520,7 +500,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.setColumnStretch(3, 0)  # Button group column
 
         # Create the initial fit widget
-        self.prepare_fit()
+        self.prepare_fit(sig1=self.sig1, sig2=self.sig2)
 
     def update_fit_widget(self, widget: QtWidgets.QWidget) -> None:
         # Remove the old fit widget
@@ -529,17 +509,35 @@ class InteractiveFit(QtWidgets.QDialog):
         self.fit_widget = widget
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 4)
 
-    def prepare_fit(self) -> None:
+    def prepare_fit(
+        self, sig1: FitModel | None = None, sig2: FitModel | None = None
+    ) -> None:
         # Get the selected signal and background models
-        sig1 = self.sig_comp1.currentText()
-        sig2 = self.sig_comp2.currentText()
+        if sig1 is None:
+            sig1 = self.sig_comp1.currentText()
+            sig1 = self.sig_models[sig1](self.xr)
+            dloc1 = 0.4 * (self.xr[1] - self.xr[0]) + self.xr[0]
+
+        else:
+            sig1.xr = self.xr
+            dloc1 = 0
+
+        if sig2 is None:
+            sig2 = self.sig_comp2.currentText()
+            if sig2 != "None":
+                sig2 = self.sig_models[sig2](self.xr)
+                dloc2 = 0.6 * (self.xr[1] - self.xr[0]) + self.xr[0]
+
+        else:
+            sig2.xr = self.xr
+            dloc2 = 0
+
         bkg = self.bkg_comp.currentText()
 
         # Remember current parameters and limits
         params_prev = self.params.copy()
 
         # Get the first signal model, starting values and limits
-        sig1 = self.sig_models[sig1](self.xr)
         par1 = sig1.start_val(self.s_start)
         lim1 = sig1.limits(self.s_limit)
 
@@ -578,7 +576,6 @@ class InteractiveFit(QtWidgets.QDialog):
 
         elif bkg == "None":
             # Get the model and parameters of the second signal component
-            sig2 = self.sig_models[sig2](self.xr)
             par2 = sig2.start_val(self.s_start)
             lim2 = sig2.limits(self.s_limit)
 
@@ -600,7 +597,6 @@ class InteractiveFit(QtWidgets.QDialog):
 
         else:
             # Get the model and parameters of the second signal component
-            sig2 = self.sig_models[sig2](self.xr)
             par2 = sig2.start_val(self.s_start)
             lim2 = sig2.limits(self.s_limit)
 
@@ -633,13 +629,8 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Shift the loc parameters if there are two signal components
         if self.sig2 is not None:
-            self.params["loc1"] = 0.4 * (self.xr[1] - self.xr[0]) + self.xr[0]
-            self.params["loc2"] = 0.6 * (self.xr[1] - self.xr[0]) + self.xr[0]
-
-        # Overwrite with given starting values
-        for par, val in self.start_values.items():
-            if par in self.params:
-                self.params[par] = val
+            self.params["loc1"] = dloc1
+            self.params["loc2"] = dloc2
 
         # Keep previous parameters and limits if possible
         for par in params_prev:
