@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = [
-  "pyqt6",
+    "pyside6>=6.9.0",
 ]
 dev = [
     "ruff>=0.11.11",
@@ -48,6 +48,8 @@ docs = [
     "sphinx-rtd-theme>=3.0.2",
 ]
 spec = [
+    "iminuit>=2.31.1",
+    "numba-stats>=1.10.1",
     "pint>=0.24.4",
 ]
 

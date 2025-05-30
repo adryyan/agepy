@@ -1,12 +1,12 @@
 from __future__ import annotations
 import warnings
 
-# Import PySide6 / PyQt6 modules
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 
-except ImportError:
-    raise ImportError("PySide6 required for interactive fitting.")
+except ImportError as e:
+    errmsg = "PySide6 required for interactive fitting."
+    raise ImportError(errmsg) from e
 
 # Import the modules for the fitting
 try:
@@ -21,11 +21,12 @@ try:
         cruijff,
         crystalball,
         crystalball_ex,
-        qgaussian
+        qgaussian,
     )
 
-except ImportError:
-    raise ImportError("iminuit and numba_stats required for fitting.")
+except ImportError as e:
+    errmsg = "iminuit and numba_stats required for fitting."
+    raise ImportError(errmsg) from e
 
 import numpy as np
 import numba as nb
@@ -33,190 +34,157 @@ from jacobi import propagate
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Import internal modules
 from agepy.interactive import _block_signals
-from agepy.spec.interactive.assignment_dialog import AssignmentDialog
-from agepy.spec.interactive.photons_scan import SpectrumViewer
+from ._assignment_dialog import AssignmentDialog
+from ._interactive_scan import SpectrumViewer
 from agepy import ageplot
 
-# Import modules for type hints
 from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from typing import Sequence, Tuple, Dict, Union
-    from matplotlib.backend_bases import MouseEvent
-    from numpy.typing import NDArray
-    from agepy.spec.photons import EnergyScan
 
-__all__ = ["AssignPhem"]
+if TYPE_CHECKING:
+    from matplotlib.backend_bases import MouseEvent
+    from numpy.typing import NDArray, ArrayLike
+    from .energy_scan import EnergyScan
 
 
 class AssignPhem(SpectrumViewer):
-
-    def __init__(self,
+    def __init__(
+        self,
         scan: EnergyScan,
-        edges: np.ndarray,
         reference: pd.DataFrame,
-        label: Dict[str, Union[Sequence[str], int]],
-        calib_guess: Tuple[float, float],
+        calib: tuple[float, float],
+        bins: int | ArrayLike,
     ) -> None:
         # Set the attributes
         self.reference = reference
-        self.label = label
-        self.calib = calib_guess
         self.step = 0
 
+        # Prepare x -> wavelength conversion and vice versa
+        self.a0, self.a1 = calib
+        self.b1 = 1 / self.a1
+        self.b0 = -self.a0 / self.a1
+
         # Define x limits
-        self.xlim = (scan.roi[0][0], scan.roi[0][1])
+        self.xlim = (scan.roi[0, 0], scan.roi[0, 1])
+        self.wlim = (
+            self.a1 * self.xlim[0] + self.a0,
+            self.a1 * self.xlim[1] + self.a0,
+        )
 
-        # Prepare assignments
-        if scan._phex_assignments is None:
-            raise ValueError("Phex assignments are required.")
+        # Current spectrum
+        self.y = None
+        self.yerr = None
+        self.xe = None
 
-        self.phex = scan._phex_assignments.copy()
+        # Get the phex assignments
+        self.phex = scan._phex.copy()
 
-        # Create the phem assignments dataframe
-        if scan._phem_assignments is None:
-            col = [*self.label, *self.phex_to_dict(), "model", "fit"]
-            scan._phem_assignments = pd.DataFrame(columns=col)
+        # Assignment dialog input
+        self.aqn = {"vpp": 0, "Jpp": 0}
 
         # Set up the main window
-        super().__init__(scan, edges)
+        super().__init__(scan, bins)
 
         # Add the fit action
         self.add_rect_selector(
             self.ax, self.assign, interactive=False, hint="Assign Peaks"
         )
 
-        with _block_signals(*self.actions):
+        with _block_signals(*self.calc_options.values()):
             # Disable the calib action
-            self.calc_options[2] = False
-            self.actions[2].setChecked(False)
-            self.actions[2].setEnabled(False)
+            self.calc_options["calib"].setChecked(False)
+            self.calc_options["calib"].setEnabled(False)
 
-            # Check the uncertainties, qeff and bkg actions
-            self.calc_options[0] = True
-            self.actions[0].setChecked(True)
-            self.calc_options[1] = True
-            self.actions[1].setChecked(True)
-            self.calc_options[3] = True
-            self.actions[3].setChecked(True)
+            # Activate and disable the montecarlo option
+            self.calc_options["montecarlo"].setChecked(True)
+            self.calc_options["montecarlo"].setEnabled(False)
+
+            # Activate the other options
+            self.calc_options["bkg"].setChecked(True)
+            self.calc_options["qeff"].setChecked(True)
 
         # Plot the spectrum with the adjusted settings
         self.plot()
 
-    def phex_to_dict(self):
+    def phex_index(self) -> str:
+        return self.phex.iloc[self.step].index
+
+    def phex_step(self) -> pd.Series:
         # Get the current phex assignment
-        phex = self.phex.iloc[self.step]
+        return self.phex.iloc[self.step].loc[["J", "Elp", "vp", "Jp"]]
 
-        # Create a dictionary
-        phex_dict = {}
+    def find_phex(self) -> pd.DataFrame:
+        idx = self.phex_index()
 
-        for key, val in phex.items():
-            if key in ["E", "val", "err"]:
-                continue
+        if idx not in self.scan._phem.index:
+            return pd.DataFrame()
 
-            phex_dict[key] = val
+        return self.scan._phem.loc[idx]
 
-        return phex_dict
+    def find_phem(self, phem_index: str) -> pd.Series:
+        df = self.find_phex()
 
-    def find_phem(self, values: Dict[str, Union[str, int]]) -> pd.DataFrame:
-        phem = self.scan._phem_assignments.copy()
+        if phem_index not in df.index:
+            return None
 
-        for key, val in values.items():
-            if phem.empty:
-                break
+        return df.loc[phem_index]
 
-            if key not in phem:
-                continue
-
-            phem.query(f"{key} == @val", inplace=True)
-
-        return phem
-
-    def find_reference(self, values: Dict[str, Union[str, int]]) -> pd.DataFrame:
+    def find_reference(self, phex: pd.Series) -> pd.DataFrame:
         ref = self.reference.copy()
 
-        for key, val in values.items():
-            if ref.empty:
-                break
+        return pd.merge(ref, phex, how="inner")
 
-            if key not in ref:
-                continue
-
-            ref.query(f"{key} == @val", inplace=True)
-
-        return ref
-
-    def plot(self):
-        # Prepare x -> wavelength conversion and vice versa
-        a0, a1 = self.calib
-        b1 = 1 / a1
-        b0 = -a0 / a1
-        wlim = (a1 * self.xlim[0] + a0, a1 * self.xlim[1] + a0)
-
+    def plot(self, calc: bool = True) -> None:
         # Get the current phex assignment
-        phex_dict = self.phex_to_dict()
+        phex = self.phex_step()
 
-        # Get the calculation options
-        qeff, bkg, calib, uncertainties = self.calc_options
-
-        # Recalculate the spectrum
-        if uncertainties:
-            error_prop = "montecarlo"
-
-        else:
-            error_prop = "none"
-
-        # Create a progress dialog
-        progress_dialog = QtWidgets.QProgressDialog(
-            "Calculating...", None, 0, 0, self
-        )
-        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.show()
-
-        self.y, self.yerr = self.scan.assigned_spectrum(
-            phex_dict, self.edges, n_std=1, normalize=True, qeff=qeff, bkg=bkg,
-            calib=calib, err_prop=error_prop, mc_samples=self.mc_samples
-        )
-
-        # Close the progress dialog
-        progress_dialog.close()
-
-        if not uncertainties:
-            self.yerr = None
+        if calc:
+            self.y, self.yerr, self.xe = self.scan.assigned_spectrum(
+                phex["J"],
+                phex["Elp"],
+                phex["vp"],
+                phex["Jp"],
+                n_std=1,
+                normalize=True,
+                bins=self.bins,
+                qeff=self.calc_options["qeff"].isChecked,
+                bkg=self.calc_options["bkg"].isChecked,
+                calib=False,
+                uncertainties="montecarlo",
+            )
 
         with ageplot.context(["age", "interactive"]):
             # Clear the axes
             self.ax.clear()
 
             # Set the title
-            title = ""
-            for key, val in phex_dict.items():
-                title += f"{key} = {val}, "
-
-            self.ax.set_title(title[:-2])
+            title = r"$X(v = 0, J = " + str(phex["J"]) + r") \rightarrow "
+            title += phex["Elp"] + r"(v^\rpime = " + str(phex["vp"])
+            title += r", J^\prime = " + str(phex["Jp"]) + ")$"
+            self.ax.set_title(title)
 
             # Plot the spectrum
-            self.ax.stairs(self.y, self.edges, color=ageplot.colors[1])
+            self.ax.stairs(self.y, self.xe, color=ageplot.colors[1])
 
             # Plot the uncertainties
-            if self.yerr is not None:
-                self.ax.stairs(
-                    self.y + self.yerr, self.edges, baseline=self.y - self.yerr,
-                    color=ageplot.colors[1], fill=True, alpha=0.5
-                )
+            self.ax.stairs(
+                self.y + self.yerr,
+                self.xe,
+                baseline=self.y - self.yerr,
+                color=ageplot.colors[1],
+                fill=True,
+                alpha=0.5,
+            )
 
             # Set the limits
             self.ax.set_xlim(*self.xlim)
             self.ax.set_ylim(0, np.max(self.y) * 1.1)
 
- 
             # Plot assignments
-            phem = self.find_phem(phex_dict)
+            phem = self.find_phex()
 
             # Plot the found assignments
-            for i, row in phem.iterrows():
+            for row in phem.itertuples():
                 # Define x values
                 x = np.linspace(*self.xlim, 1000)
 
@@ -224,7 +192,7 @@ class AssignPhem(SpectrumViewer):
                 y, yerr = row["fit"](x)
 
                 # Scale to the bin width
-                dx = self.edges[1] - self.edges[0]
+                dx = self.xe[1] - self.xe[0]
                 y *= dx
                 yerr *= dx
 
@@ -235,28 +203,33 @@ class AssignPhem(SpectrumViewer):
                 )
 
             # Plot reference
-            ref = self.find_reference(phex_dict)
+            ref = self.find_reference(phex)
 
             # Select lines within the wavelength limits
             if not ref.empty:
-                ref = ref.query("E >= @wlim[0]").query("E <= @wlim[1]")
+                ref = ref.query("emi_energy >= @self.wlim[0]").query(
+                    "emi_energy <= @self.wlim[1]"
+                )
 
             # Plot the found reference
-            for i, row in ref.iterrows():
+            for row in ref.itertuples():
                 # Convert to detector position
-                x = b1 * row["E"] + b0
+                x = self.b1 * row["emi_energy"] + self.b0
 
                 # Plot the reference
                 self.ax.axvline(x, color="black", linestyle="--")
 
                 # Create the text
-                text = ""
-                for label in self.label:
-                    text += f"{row[label]},"
+                text = r"$v^{\prime\prime} = " + str(row["vpp"])
+                text += r", J^{\prime\prime} = " + str(row["Jpp"]) + "$"
 
                 self.ax.text(
-                    x + 0.0002, np.max(self.y), text[:-1], ha="left", va="top",
-                    rotation=90
+                    x + 0.0004,
+                    np.max(self.y),
+                    text,
+                    ha="left",
+                    va="top",
+                    rotation=90,
                 )
 
             # Update the canvas
@@ -273,26 +246,28 @@ class AssignPhem(SpectrumViewer):
         xr = (eclick.xdata, erelease.xdata)
 
         # Get the current phex assignment
-        phex_dict = self.phex_to_dict()
+        phex_index = self.phex_index()
 
-        # Recalculate the spectrum with uncertainties
-        if self.yerr is None:
-            self.actions[3].setChecked(True)
-        
         # Prepare the data for the fit
-        in_range = np.argwhere((
-            self.edges >= xr[0]) & (self.edges <= xr[1])
+        in_range = np.argwhere(
+            (self.xe >= xr[0]) & (self.xe <= xr[1])
         ).flatten()
-        xe = self.edges[in_range]
+
+        xe = self.xe[in_range]
         y = self.y[in_range[:-1]]
         yerr = self.yerr[in_range[:-1]]
+
         n = np.stack((y, yerr**2), axis=-1)
 
         # Get the assignment for the first peak
-        dialog = AssignmentDialog(self, self.label, title="Assign Peak 1")
+        dialog = AssignmentDialog(self, self.aqn, title="Assign Peak 1")
+
         if dialog.exec():
             # Get the user input
-            phem1 = dialog.get_input()
+            phem1_input = dialog.get_input()
+            phem1_index = (
+                str(phem1_input["vpp"]) + "," + str(phem1_input["Jpp"])
+            )
 
             # Define starting values
             start_values = {}
@@ -301,61 +276,47 @@ class AssignPhem(SpectrumViewer):
             sig1_model = "Voigt"
             sig2_model = "None"
 
-            # Add the phex assignment
-            phem1 = {**phem1, **phex_dict}
+            # Check if the assignment exists
+            phem1 = self.find_phem(phem1_index)
 
-            # Find the index where to save the assignment
-            df = self.find_phem(phem1)
-
-            if df.empty:
-                idx1 = self.scan._phem_assignments.index.max()
-                if np.isnan(idx1):
-                    idx1 = 0
-
-                else:
-                    idx1 += 1
+            if phem1 is None:
+                phem1 = phem1_input
 
             else:
-                idx1 = df.index[0]
+                phem1 = phem1.to_dict()
 
                 # Get the model and starting values
-                sig1_model = df.loc[idx1, "model"]
-                start_values = df.loc[idx1, "fit"].start_val(1)
+                sig1_model = phem1["fit"].name
+                start_values = phem1["fit"].start_val(1)
                 start_values = {f"{k}1": v for k, v in start_values.items()}
 
         else:
             return
 
         # Get the assignment for the second peak
-        dialog = AssignmentDialog(self, self.label, title="Assign Peak 2")
+        dialog = AssignmentDialog(self, self.aqn, title="Assign Peak 2")
+
         if dialog.exec():
             # Get the user input
-            phem2 = dialog.get_input()
+            phem2_input = dialog.get_input()
+            phem2_index = (
+                str(phem2_input["vpp"]) + "," + str(phem2_input["Jpp"])
+            )
 
             # Set the default signal model
             sig2_model = "Voigt"
 
-            # Add the phex assignment
-            phem2 = {**phem2, **phex_dict}
+            phem2 = self.find_phem(phem2_index)
 
-            # Find the index where to save the assignment
-            df = self.find_phem(phem2)
-
-            if df.empty:
-                idx2 = self.scan._phem_assignments.index.max()
-
-                if np.isnan(idx2) or idx2 + 1 == idx1:
-                    idx2 = idx1 + 1
-
-                else:
-                    idx2 += 1
+            if phem2 is None:
+                phem2 = phem2_input
 
             else:
-                idx2 = df.index[0]
+                phem2 = phem2.to_dict()
 
                 # Get the model and starting values
-                sig2_model = df.loc[idx2, "model"]
-                sv2 = df.loc[idx2, "fit"].start_val(1)
+                sig2_model = phem2["fit"].name
+                sv2 = phem2["fit"].start_val(1)
                 sv2 = {f"{k}2": v for k, v in sv2.items()}
                 start_values = {**start_values, **sv2}
 
@@ -363,8 +324,12 @@ class AssignPhem(SpectrumViewer):
             phem2 = None
 
         debug_fit = InteractiveFit(
-            self, n, xe, sig=[sig1_model, sig2_model], bkg="Constant",
-            **start_values
+            self,
+            n,
+            xe,
+            sig=[sig1_model, sig2_model],
+            bkg="Constant",
+            **start_values,
         )
 
         # Fit the data
@@ -377,17 +342,17 @@ class AssignPhem(SpectrumViewer):
                 return
 
             # Create the new row
-            phem1 = {**phem1, **res1}
+            phem1["fit"] = res1
 
             # Save the assignment
-            self.scan._phem_assignments.loc[idx1] = phem1
+            self.scan._phem.loc[phex_index].loc[phem1_index] = phem1
 
-            if phem2 is not None and  res2 is not None:
+            if phem2 is not None and res2 is not None:
                 # Create the new row
-                phem2 = {**phem2, **res2}
+                phem2["fit"] = res2
 
                 # Save the assignment
-                self.scan._phem_assignments.loc[idx2] = phem2
+                self.scan._phem.loc[phex_index].loc[phem2_index] = phem2
 
         # Close pyplot figures
         plt.close("all")
@@ -397,7 +362,6 @@ class AssignPhem(SpectrumViewer):
 
 
 class InteractiveFit(QtWidgets.QDialog):
-
     sig_models = {
         "Gaussian": lambda xr: Gaussian(xr),
         "Q-Gaussian": lambda xr: QGaussian(xr),
@@ -417,13 +381,14 @@ class InteractiveFit(QtWidgets.QDialog):
         "Bernstein4d": lambda xr: Bernstein(4, xr),
     }
 
-    def __init__(self,
+    def __init__(
+        self,
         parent: QtWidgets.QWidget,
         n: NDArray,
         xe: NDArray,
-        sig: Union[str, Tuple[str, str]] = "Gaussian",
+        sig: str | tuple[str, str] = "Gaussian",
         bkg: str = "None",
-        **start_values
+        **start_values,
     ) -> None:
         # Initialize fit data
         self.n = n
@@ -433,7 +398,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.xr = (xe[0], xe[-1])
 
         # Define starting values and limits
-        nsum = np.sum(n[:,0])
+        nsum = np.sum(n[:, 0])
         self.s_start = nsum * 0.9
         self.s_limit = nsum * 1.1
         self.start_values = start_values
@@ -480,7 +445,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
             QtWidgets.QSizePolicy.Policy.MinimumExpanding,
-            QtWidgets.QSizePolicy.Policy.MinimumExpanding
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
         )
 
         # Create signal model selection widget
@@ -522,7 +487,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
             QtWidgets.QSizePolicy.Policy.Minimum,
-            QtWidgets.QSizePolicy.Policy.MinimumExpanding
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
         )
 
         # Create the button box
@@ -531,14 +496,21 @@ class InteractiveFit(QtWidgets.QDialog):
         self.button_layout = QtWidgets.QHBoxLayout(self.button_group)
         self.button_box = QtWidgets.QDialogButtonBox(parent=self)
         self.button_box.setOrientation(QtCore.Qt.Orientation.Horizontal)
-        self.button_box.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Cancel | QtWidgets.QDialogButtonBox.StandardButton.Ok)
-        self.button_box.accepted.connect(self.accept)  # type: ignore
-        self.button_box.rejected.connect(self.reject)  # type: ignore
+        self.button_box.setStandardButtons(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
         QtCore.QMetaObject.connectSlotsByName(self)
         self.button_layout.addWidget(self.button_box)
         self.layout.addWidget(
-            self.button_group, 1, 3, 1, 1,
-            alignment=QtCore.Qt.AlignmentFlag.AlignLeft
+            self.button_group,
+            1,
+            3,
+            1,
+            1,
+            alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
         )
 
         # Set the column stretch factors
@@ -550,7 +522,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create the initial fit widget
         self.prepare_fit()
 
-    def update_fit_widget(self, widget) -> None:
+    def update_fit_widget(self, widget: QtWidgets.QWidget) -> None:
         # Remove the old fit widget
         self.layout.removeWidget(widget)
         # Set the new fit widget
@@ -653,8 +625,11 @@ class InteractiveFit(QtWidgets.QDialog):
             idx2 = len(par2) + idx1
 
             def integral(x, *args):
-                return sig1.cdf(x, args[:idx1]) + sig2.cdf(x, args[idx1:idx2]) \
+                return (
+                    sig1.cdf(x, args[:idx1])
+                    + sig2.cdf(x, args[idx1:idx2])
                     + bkg.cdf(x, args[idx2:])
+                )
 
         # Shift the loc parameters if there are two signal components
         if self.sig2 is not None:
@@ -678,13 +653,15 @@ class InteractiveFit(QtWidgets.QDialog):
         self.m = Minuit(
             c, *list(self.params.values()), name=list(self.params.keys())
         )
-        
+
         # Set the limits
         for par, lim in limits.items():
             self.m.limits[par] = lim
 
         # Update the visualization
-        fit_widget = make_widget(self.m, self.m._visualize(None), {}, False, False)
+        fit_widget = make_widget(
+            self.m, self.m._visualize(None), {}, False, False
+        )
 
         # Perform the fit
         fit_widget.fit_button.click()
@@ -692,18 +669,12 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def fit_result(self):
+    def fit_result(self) -> tuple[FitModel | None, FitModel | None]:
         if not self.m.valid:
             return None, None
 
         # Get the covariance matrix
         cov = np.array(self.m.covariance)
-
-        # Get the fit results for sig1
-        sig1 = {}
-
-        # Get the model name
-        sig1["model"] = self.sig_comp1.currentText()
 
         # Append 1 to the parameter names
         par1 = [f"{k}1" for k in self.sig1.par]
@@ -713,19 +684,10 @@ class InteractiveFit(QtWidgets.QDialog):
         self.sig1.err = np.array(self.m.errors[par1])
 
         # Get the covariance matrix for sig1
-        self.sig1.cov = cov[:len(par1), :len(par1)]
-        
-        # Set the fit results for sig1
-        sig1["fit"] = self.sig1
+        self.sig1.cov = cov[: len(par1), : len(par1)]
 
         if self.sig2 is None:
-            return sig1, None
-
-        # Get the fit results for sig2
-        sig2 = {}
-
-        # Get the model name
-        sig2["model"] = self.sig_comp2.currentText()
+            return self.sig1, None
 
         # Append 2 to the parameter names
         par2 = [f"{k}2" for k in self.sig2.par]
@@ -738,17 +700,14 @@ class InteractiveFit(QtWidgets.QDialog):
         idx1 = len(par1)
         idx2 = idx1 + len(par2)
         self.sig2.cov = cov[idx1:idx2, idx1:idx2]
-        
-        # Set the fit results for sig2
-        sig2["fit"] = self.sig2
 
-        return sig1, sig2
+        return self.sig1, self.sig2
 
 
 class FitModel:
-
-    def __init__(self,
-        xr: Tuple[float, float],
+    def __init__(
+        self,
+        xr: tuple[float, float],
     ) -> None:
         self.xr = xr
 
@@ -757,7 +716,7 @@ class FitModel:
         self.err = None
         self.cov = None
 
-    def __call__(self, x: NDArray) -> Tuple[NDArray, NDArray]:
+    def __call__(self, x: NDArray) -> tuple[NDArray, NDArray]:
         if self.cov is None:
             raise ValueError("Fit results are not available.")
 
@@ -769,13 +728,13 @@ class FitModel:
     def start_val(self, n):
         if self.val is not None:
             return {k: v for k, v in zip(self.par, self.val)}
-        
+
         else:
             return self._start_val(n)
 
 
 class Gaussian(FitModel):
-
+    name = "Gaussian"
     par = ["s", "loc", "scale"]
 
     @staticmethod
@@ -790,18 +749,21 @@ class Gaussian(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
+            "s": (0, n_max),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
         }
 
     def _start_val(self, n):
         return {
-            "s": n, "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0])
+            "s": n,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
         }
 
 
 class Voigt(FitModel):
-
+    name = "Voigt"
     par = ["s", "gamma", "loc", "scale"]
 
     @staticmethod
@@ -816,43 +778,51 @@ class Voigt(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "gamma": (0.00001 * dx, 0.1 * dx),
-            "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
+            "s": (0, n_max),
+            "gamma": (0.00001 * dx, 0.1 * dx),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
         }
 
     def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": n, "gamma": 0.01 * dx, "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0])
+            "s": n,
+            "gamma": 0.01 * dx,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
         }
 
 
 class QGaussian(FitModel):
-
+    name = "Q-Gaussian"
     par = ["s", "q", "loc", "scale"]
 
     @staticmethod
     def pdf(x, par):
         if par[1] < 1:
             par[1] = 1
-            warnings.warn("q cannot be smaller than 1. Setting q=1.")
+            wrnmsg = "q cannot be smaller than 1. Setting q=1."
+            warnings.warn(wrnmsg, stacklevel=1)
 
         if par[1] > 3:
             par[1] = 3
-            warnings.warn("q cannot be larger than 3. Setting q=3.")
+            wrnmsg = "q cannot be larger than 3. Setting q=3."
+            warnings.warn(wrnmsg, stacklevel=1)
 
         return par[0] * qgaussian.pdf(x, *par[1:])
 
     def cdf(self, x, par):
         if par[1] < 1:
             par[1] = 1
-            warnings.warn("q cannot be smaller than 1. Setting q=1.")
+            wrnmsg = "q cannot be smaller than 1. Setting q=1."
+            warnings.warn(wrnmsg, stacklevel=1)
 
         if par[1] > 3:
             par[1] = 3
-            warnings.warn("q cannot be larger than 3. Setting q=3.")
+            wrnmsg = "q cannot be larger than 3. Setting q=3."
+            warnings.warn(wrnmsg, stacklevel=1)
 
         return par[0] * qgaussian.cdf(x, *par[1:])
 
@@ -860,19 +830,23 @@ class QGaussian(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "q": (1, 3), "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx)
+            "s": (0, n_max),
+            "q": (1, 3),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
         }
 
     def _start_val(self, n):
         return {
-            "s": n, "q": 2, "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0])
+            "s": n,
+            "q": 2,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
         }
 
 
 class Cruijff(FitModel):
-
+    name = "Cruijff"
     par = ["s", "beta_left", "beta_right", "loc", "scale_left", "scale_right"]
 
     @staticmethod
@@ -887,23 +861,29 @@ class Cruijff(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "beta_left": (0, 1), "beta_right": (0, 1),
-            "loc": self.xr, "scale_left": (0.0001 * dx, 0.5 * dx),
-            "scale_right": (0.0001 * dx, 0.5 * dx)
+            "s": (0, n_max),
+            "beta_left": (0, 1),
+            "beta_right": (0, 1),
+            "loc": self.xr,
+            "scale_left": (0.0001 * dx, 0.5 * dx),
+            "scale_right": (0.0001 * dx, 0.5 * dx),
         }
 
     def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": n, "beta_left": 0.1, "beta_right": 0.1,
+            "s": n,
+            "beta_left": 0.1,
+            "beta_right": 0.1,
             "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale_left": 0.05 * dx, "scale_right": 0.05 * dx
+            "scale_left": 0.05 * dx,
+            "scale_right": 0.05 * dx,
         }
 
 
 class CrystalBall(FitModel):
-
+    name = "CrystalBall"
     par = ["s", "beta", "m", "loc", "scale"]
 
     @staticmethod
@@ -918,66 +898,87 @@ class CrystalBall(FitModel):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "beta": (0, 5), "m": (1, 10),
-            "loc": self.xr, "scale": (0.0001 * dx, 0.5 * dx)
+            "s": (0, n_max),
+            "beta": (0, 5),
+            "m": (1, 10),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
         }
 
     def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": n, "beta": 1, "m": 2,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]), "scale": 0.05 * dx
+            "s": n,
+            "beta": 1,
+            "m": 2,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * dx,
         }
 
 
 class CrystalBallEx(FitModel):
-
+    name = "CrystalBallEx"
     par = [
-        "s", "beta_left", "m_left", "scale_left", "beta_right", "m_right",
-        "scale_right", "loc"
+        "s",
+        "beta_left",
+        "m_left",
+        "scale_left",
+        "beta_right",
+        "m_right",
+        "scale_right",
+        "loc",
     ]
 
     @staticmethod
     def pdf(x, par):
         return par[0] * crystalball_ex.pdf(x, *par[1:])
-    
+
     @staticmethod
     def cdf(x, par):
         return par[0] * crystalball_ex.cdf(x, *par[1:])
-    
+
     def limits(self, n_max):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": (0, n_max), "beta_left": (0, 5), "m_left": (1, 10),
-            "scale_left": (0.0001 * dx, 0.5 * dx), "beta_right": (0, 5),
-            "m_right": (1, 10), "scale_right": (0.0001 * dx, 0.5 * dx),
-            "loc": self.xr
+            "s": (0, n_max),
+            "beta_left": (0, 5),
+            "m_left": (1, 10),
+            "scale_left": (0.0001 * dx, 0.5 * dx),
+            "beta_right": (0, 5),
+            "m_right": (1, 10),
+            "scale_right": (0.0001 * dx, 0.5 * dx),
+            "loc": self.xr,
         }
-    
+
     def _start_val(self, n):
         dx = self.xr[1] - self.xr[0]
 
         return {
-            "s": n, "beta_left": 1, "m_left": 2, "scale_left": 0.05 * dx,
-            "beta_right": 1, "m_right": 2, "scale_right": 0.05 * dx,
-            "loc": 0.5 * (self.xr[0] + self.xr[1])
+            "s": n,
+            "beta_left": 1,
+            "m_left": 2,
+            "scale_left": 0.05 * dx,
+            "beta_right": 1,
+            "m_right": 2,
+            "scale_right": 0.05 * dx,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
         }
 
 
 class Bernstein(FitModel):
-
     par = ["b_ij"]
 
-    def __init__(self,
+    def __init__(
+        self,
         deg: int,
-        xr: Tuple[float, float],
+        xr: tuple[float, float],
     ) -> None:
         super().__init__(xr)
 
         self.deg = deg
-        self.par = [f"b_{i}{deg}" for i in range(deg+1)]
+        self.par = [f"b_{i}{deg}" for i in range(deg + 1)]
 
     def pdf(self, x, par):
         return bernstein.density(x, par, *self.xr)
@@ -986,14 +987,13 @@ class Bernstein(FitModel):
         return bernstein.integral(x, par, *self.xr)
 
     def limits(self):
-        return {f"b_{i}{self.deg}": (0, None) for i in range(self.deg+1)}
+        return {f"b_{i}{self.deg}": (0, None) for i in range(self.deg + 1)}
 
     def start_val(self):
-        return {f"b_{i}{self.deg}": 1 for i in range(self.deg+1)}
+        return {f"b_{i}{self.deg}": 1 for i in range(self.deg + 1)}
 
 
 class Constant(FitModel):
-    
     par = ["b"]
 
     def pdf(self, x, par):
@@ -1010,7 +1010,6 @@ class Constant(FitModel):
 
 
 class Exponential(FitModel):
-
     par = ["b", "loc_expon", "scale_expon"]
 
     def pdf(self, x, par):
@@ -1021,7 +1020,9 @@ class Exponential(FitModel):
 
     def limits(self):
         return {
-            "b": (0, None), "loc_expon": (-1, 0), "scale_expon": (-100, 100)
+            "b": (0, None),
+            "loc_expon": (-1, 0),
+            "scale_expon": (-100, 100),
         }
 
     def start_val(self):
@@ -1033,6 +1034,6 @@ def num_eval_cdf(x, _x, _pdf):
     _y = np.empty_like(_x)
 
     for i in nb.prange(len(_x)):
-        _y[i] = np.trapz(_pdf[:i+1], x=_x[:i+1])
+        _y[i] = np.trapz(_pdf[: i + 1], x=_x[: i + 1])
 
     return np.interp(x, _x, _y)

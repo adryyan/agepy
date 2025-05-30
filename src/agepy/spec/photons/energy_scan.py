@@ -113,11 +113,14 @@ class EnergyScan(Scan):
         self.energy_uncertainty = energy_uncertainty
 
         # Create DataFrames for the assignments
-        col = ["J", "Elp", "vp", "Jp", "model", "fit"]
+        col = ["J", "Elp", "vp", "Jp", "fit", "exc_energy"]
         self._phex = pd.DataFrame(columns=col)
 
-        col = ["J", "Elp", "vp", "Jp", "vpp", "Jpp", "model", "fit"]
+        col = ["vpp", "Jpp", "fit"]
         self._phem = pd.DataFrame(columns=col)
+        self._phem.index = pd.MultiIndex.from_tuples(
+            [], names=["phex", "phem"]
+        )
 
     @property
     def energies(self) -> NDArray:
@@ -260,17 +263,28 @@ class EnergyScan(Scan):
     def assign_phex(
         self,
         reference: pd.DataFrame,
-        label: dict[str, Sequence[str] | int],
-        energy_range: float,
+        energy_range: float = 0.05,
     ) -> int:
+        """Interactively assign excitations to peaks in the
+        exciting-photon energy spectrum.
+
+        Parameters
+        ----------
+        reference: pd.DataFrame
+            DataFrame containing excitation energies in eV with the
+            corresponding transition labels: J, Elp, vp, Jp.
+        energy_range: float
+            Energy range length to show in one plot.
+
+        """
         from agepy.interactive import get_qapp
-        from agepy.spec.interactive.photons_phex import AssignPhex
+        from ._interactive_phex import AssignPhex
 
         # Get the Qt application
         app = get_qapp()
 
         # Intialize the viewer
-        mw = AssignPhex(self, reference, label, energy_range)
+        mw = AssignPhex(self, reference, energy_range)
         mw.show()
 
         # Run the application

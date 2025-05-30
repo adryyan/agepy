@@ -1,31 +1,20 @@
 from __future__ import annotations
-import warnings
 
-# Import PySide6 / PyQt6 modules
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 
-    qt_binding = "PySide6"
+except ImportError as e:
+    errmsg = "PySide6 required for interactive fitting."
+    raise ImportError(errmsg) from e
 
-except ImportError:
-    warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
-
-    try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
-
-        qt_binding = "PyQt6"
-
-    except ImportError:
-        raise ImportError("No compatible Qt bindings found.")
-
-# Import the modules for the fitting
 try:
     from iminuit import Minuit, cost
     from iminuit.qtwidget import make_widget
     from numba_stats import norm
 
-except ImportError:
-    raise ImportError("iminuit and jax required for fitting.")
+except ImportError as e:
+    errmsg = "iminuit and numba_stats required for fitting."
+    raise ImportError(errmsg) from e
 
 import numpy as np
 import numba as nb
@@ -33,34 +22,28 @@ from jacobi import propagate
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Import internal modules
-from agepy.spec.interactive.assignment_dialog import AssignmentDialog
 from agepy.interactive import MainWindow
+from ._assignment_dialog import AssignmentDialog
 from agepy import ageplot
 
-# Import modules for type hints
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
-    from typing import Sequence, Tuple, Dict, Union
     from matplotlib.backend_bases import MouseEvent
     from numpy.typing import NDArray
-    from agepy.spec.photons import EnergyScan
-
-__all__ = ["AssignPhex"]
+    from .energy_scan import EnergyScan
 
 
 class AssignPhex(MainWindow):
-
-    def __init__(self,
+    def __init__(
+        self,
         scan: EnergyScan,
         reference: pd.DataFrame,
-        label: Dict[str, Union[Sequence[str], int]],
         energy_range: float,
     ) -> None:
         # Set the scan and reference data
         self.scan = scan
         self.reference = reference
-        self.label = label
 
         # Initialize the parent class
         super().__init__()
@@ -74,17 +57,13 @@ class AssignPhex(MainWindow):
             self.ax, self.assign, interactive=False, hint="Assign Excitation"
         )
 
+        self.aqn = {"J": 0, "Elp": ["B"], "vp": 0, "Jp": 0}
+
         # Prepare the data
-        self.y, self.yerr, self.x = self.scan.counts(qeff=False)
+        self.y, self.yerr, self.x = self.scan.counts(bkg=False)
         self.xerr = self.scan.energy_uncertainty
         self.ymax = np.max(self.y)
         self.ymin = np.min(self.y)
-
-        # Prepare assignments
-        if self.scan._phex_assignments is None:
-            self.scan._phex_assignments = pd.DataFrame(
-                columns=["E", *self.label, "val", "err"]
-            )
 
         # Set the x limit
         self.dx = energy_range
@@ -112,51 +91,51 @@ class AssignPhex(MainWindow):
             )
 
             # Plot the reference
-            ref = self.reference.query(
-                "E >= @self.xlim[0]").query("E <= @self.xlim[1]")
+            ref = self.reference.query("E >= @self.xlim[0]").query(
+                "E <= @self.xlim[1]"
+            )
 
-            for i, row in ref.iterrows():
+            for row in ref.itertuples():
                 # Plot the reference energy
-                self.ax.axvline(row["E"], color="black", linestyle="--")
+                self.ax.axvline(
+                    row["exc_energy"], color="black", linestyle="--"
+                )
 
                 # Create the text
-                text = ""
-                for label in self.label:
-                    if label in row:
-                        text += f"{row[label]},"
-
-                # Remove the last comma
-                text = text[:-1]
+                text = r"$X(v = 0, J = " + str(row["J"]) + r") \rightarrow "
+                text += row["Elp"] + r"(v^\rpime = " + str(row["vp"])
+                text += r", J^\prime = " + str(row["Jp"]) + ")$"
 
                 # Plot the label
                 self.ax.text(
-                    row["E"] + self.dx * 0.001, self.ymax, text, ha="left",
-                    va="top", rotation=90
+                    row["exc_energy"] + self.dx * 0.001,
+                    self.ymax,
+                    text,
+                    ha="left",
+                    va="top",
+                    rotation=90,
                 )
 
             # Plot the assignments
-            fit = self.scan._phex_assignments.query(
-                "E >= @self.xlim[0]").query("E <= @self.xlim[1]")
-            
+            fit = self.scan._phex.query("exc_energy >= @self.xlim[0]").query(
+                "exc_energy <= @self.xlim[1]"
+            )
+
             # Define x values
             x_fit = np.linspace(self.xlim[0], self.xlim[1], 1000)
 
-            for i, row in fit.iterrows():
-                # Get the fit results
-                val = row["val"]
-                err = row["err"]
-
+            for row in fit.itertuples():
                 # Evaluate at the x values and propagate the uncertainties
-                y_fit, yerr_fit = propagate(
-                    lambda par: par[0] * norm.pdf(x_fit, *par[1:]), val, err**2
-                )
-                yerr_fit = np.sqrt(np.diag(yerr_fit))
+                y_fit, yerr_fit = row["fit"](x_fit)
 
                 # Plot the fit
                 self.ax.plot(x_fit, y_fit, color=ageplot.colors[1])
                 self.ax.fill_between(
-                    x_fit, y_fit - yerr_fit, y_fit + yerr_fit,
-                    color=ageplot.colors[1], alpha=0.5
+                    x_fit,
+                    y_fit - yerr_fit,
+                    y_fit + yerr_fit,
+                    color=ageplot.colors[1],
+                    alpha=0.5,
                 )
 
             # Set the plot limits and labels
@@ -189,12 +168,13 @@ class AssignPhex(MainWindow):
         self.plot()
 
     def look_up(self):
-        dialog = AssignmentDialog(self, self.label, title="Look-Up")
+        dialog = AssignmentDialog(self, self.aqn, title="Look-Up")
+
         if dialog.exec():
             exc = dialog.get_input()
             E = self.reference.copy()
 
-            for l, val in exc.items():
+            for l, val in exc.items():  # noqa B007
                 query_str = f"{l} == @val"
                 E.query(query_str, inplace=True)
 
@@ -202,7 +182,7 @@ class AssignPhex(MainWindow):
                 return
 
             else:
-                E = E["E"].iloc[0]
+                E = E["exc_energy"].iloc[0]
 
             E_min, E_max = E - self.dx * 0.5, E + self.dx * 0.5
 
@@ -279,7 +259,8 @@ class AssignPhex(MainWindow):
                 val_start2 = df["val"].iloc[0]
                 val_start2[1] -= val_start1["loc1"]
                 val_start2 = {
-                    "s2": val_start2[0], "loc2_loc1": val_start2[1],
+                    "s2": val_start2[0],
+                    "loc2_loc1": val_start2[1],
                 }
 
             # Prepare constraint of the energy difference
@@ -301,16 +282,29 @@ class AssignPhex(MainWindow):
                 constraint = (diff, np.mean(xerr) * 2)
 
             debug_fit = InteractiveFit(
-                self, y, yerr, x, xerr, sig=["Gaussian", "Gaussian"],
-                bkg="Constant", constrain_dE=constraint, **val_start1,
-                **val_start2
+                self,
+                y,
+                yerr,
+                x,
+                xerr,
+                sig=["Gaussian", "Gaussian"],
+                bkg="Constant",
+                constrain_dE=constraint,
+                **val_start1,
+                **val_start2,
             )
 
         else:
             exc2 = None
             debug_fit = InteractiveFit(
-                self, y, yerr, x, xerr, sig="Gaussian", bkg="Constant",
-                **val_start1
+                self,
+                y,
+                yerr,
+                x,
+                xerr,
+                sig="Gaussian",
+                bkg="Constant",
+                **val_start1,
             )
 
         # Fit the data
@@ -333,7 +327,8 @@ class AssignPhex(MainWindow):
                 cov = cov[np.ix_(inds, inds)]
                 loc2, loc2err = propagate(
                     lambda par: par[0] + par[1],
-                    m.values["loc1", "loc2_loc1"], cov
+                    m.values["loc1", "loc2_loc1"],
+                    cov,
                 )
 
                 exc2["E"] = loc2
@@ -355,8 +350,8 @@ class AssignPhex(MainWindow):
 
 
 class InteractiveFit(QtWidgets.QDialog):
-
-    def __init__(self,
+    def __init__(
+        self,
         parent: QtWidgets.QWidget,
         y: NDArray,
         yerr: NDArray,
@@ -365,7 +360,7 @@ class InteractiveFit(QtWidgets.QDialog):
         sig: Union[str, Tuple[str, str]] = "Gaussian",
         bkg: str = "Constant",
         constrain_dE: Tuple[float, float] = None,
-        **start_values
+        **start_values,
     ) -> None:
         # Initialize fit data
         self.y = y
@@ -424,7 +419,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
             QtWidgets.QSizePolicy.Policy.MinimumExpanding,
-            QtWidgets.QSizePolicy.Policy.MinimumExpanding
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
         )
 
         # Create signal model selection widget
@@ -436,7 +431,9 @@ class InteractiveFit(QtWidgets.QDialog):
         self.sig_comp1 = QtWidgets.QComboBox()
         self.sig_comp1.setSizePolicy(size_policy)
         self.sig_comp1.addItems(self.sig_models.keys())
-        self.sig_comp1.setCurrentIndex(list(self.sig_models.keys()).index(sig[0]))
+        self.sig_comp1.setCurrentIndex(
+            list(self.sig_models.keys()).index(sig[0])
+        )
         self.sig_comp1.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp1)
 
@@ -444,7 +441,9 @@ class InteractiveFit(QtWidgets.QDialog):
         self.sig_comp2 = QtWidgets.QComboBox()
         self.sig_comp2.setSizePolicy(size_policy)
         self.sig_comp2.addItems(list(self.sig_models.keys()) + ["None"])
-        self.sig_comp2.setCurrentIndex((list(self.sig_models.keys()) + ["None"]).index(sig[1]))
+        self.sig_comp2.setCurrentIndex(
+            (list(self.sig_models.keys()) + ["None"]).index(sig[1])
+        )
         self.sig_comp2.currentIndexChanged.connect(self.prepare_fit)
         self.signal_layout.addWidget(self.sig_comp2)
 
@@ -465,7 +464,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
             QtWidgets.QSizePolicy.Policy.Minimum,
-            QtWidgets.QSizePolicy.Policy.MinimumExpanding
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
         )
 
         # Create the button box
@@ -474,14 +473,21 @@ class InteractiveFit(QtWidgets.QDialog):
         self.button_layout = QtWidgets.QHBoxLayout(self.button_group)
         self.button_box = QtWidgets.QDialogButtonBox(parent=self)
         self.button_box.setOrientation(QtCore.Qt.Orientation.Horizontal)
-        self.button_box.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Cancel | QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        self.button_box.setStandardButtons(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
         self.button_box.accepted.connect(self.accept)  # type: ignore
         self.button_box.rejected.connect(self.reject)  # type: ignore
         QtCore.QMetaObject.connectSlotsByName(self)
         self.button_layout.addWidget(self.button_box)
         self.layout.addWidget(
-            self.button_group, 1, 3, 1, 1,
-            alignment=QtCore.Qt.AlignmentFlag.AlignLeft
+            self.button_group,
+            1,
+            3,
+            1,
+            1,
+            alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
         )
 
         # Set the column stretch factors
@@ -512,7 +518,9 @@ class InteractiveFit(QtWidgets.QDialog):
             model, derivative, self.params, limits = self.gaussian()
 
         else:
-            model, derivative, self.params, limits = self.constrained_gaussians()
+            model, derivative, self.params, limits = (
+                self.constrained_gaussians()
+            )
 
             # Define the constraint if available
             if self.constrain_dE is not None:
@@ -530,7 +538,6 @@ class InteractiveFit(QtWidgets.QDialog):
             if par in self.params:
                 self.params[par] = self.m.values[par]
 
-
         # Define the cost function
         x = self.x
         xerr = self.xerr
@@ -544,7 +551,6 @@ class InteractiveFit(QtWidgets.QDialog):
             return result
 
         class LeastSquaresXY(cost.LeastSquares):
-
             def _value(self, args: Sequence[float]) -> float:
                 return _cost(args)
 
@@ -555,14 +561,18 @@ class InteractiveFit(QtWidgets.QDialog):
             c = LeastSquaresXY(self.x, self.y, self.yerr, model) + nconstraint
 
         # Update the Minuit object
-        self.m = Minuit(c, *list(self.params.values()), name=list(self.params.keys()))
+        self.m = Minuit(
+            c, *list(self.params.values()), name=list(self.params.keys())
+        )
 
         # Set the limits
         for par, lim in limits.items():
             self.m.limits[par] = lim
 
         def plot(args):
-            plt.errorbar(self.x, self.y, yerr=self.yerr, xerr=self.xerr, fmt="ok")
+            plt.errorbar(
+                self.x, self.y, yerr=self.yerr, xerr=self.xerr, fmt="ok"
+            )
             x = np.linspace(self.xr[0], self.xr[1], 1000)
             plt.plot(x, model(x, *args))
 
@@ -586,12 +596,16 @@ class InteractiveFit(QtWidgets.QDialog):
     def gaussian(self) -> Tuple[callable, callable, dict, dict]:
         dx = self.xr[1] - self.xr[0]
         params = {
-            "s1": self.s_start, "loc1": self.xr[0] + 0.5 * dx,
-            "scale1": 0.1 * dx, "b": self.x[1] - self.x[0]
+            "s1": self.s_start,
+            "loc1": self.xr[0] + 0.5 * dx,
+            "scale1": 0.1 * dx,
+            "b": self.x[1] - self.x[0],
         }
         limits = {
-            "s1": (0, self.s_limit), "loc1": self.xr,
-            "scale1": (0.0001 * dx, 0.5 * dx), "b": (0, None)
+            "s1": (0, self.s_limit),
+            "loc1": self.xr,
+            "scale1": (0.0001 * dx, 0.5 * dx),
+            "b": (0, None),
         }
 
         @nb.njit
@@ -607,25 +621,38 @@ class InteractiveFit(QtWidgets.QDialog):
     def constrained_gaussians(self) -> Tuple[callable, callable, dict, dict]:
         dx = self.xr[1] - self.xr[0]
         params = {
-            "s1": self.s_start, "s2": self.s_start,
+            "s1": self.s_start,
+            "s2": self.s_start,
             "loc1": self.xr[0] + 0.35 * dx,
             "loc2_loc1": 0.35 * dx,
-            "scale1": 0.1 * dx, "b": self.x[1] - self.x[0]
+            "scale1": 0.1 * dx,
+            "b": self.x[1] - self.x[0],
         }
         limits = {
-            "s1": (0, self.s_limit), "s2": (0, self.s_limit),
-            "loc1": self.xr, "loc2_loc1": (0, dx),
-            "scale1": (0.0001 * dx, 0.5 * dx), "b": (0, None)
+            "s1": (0, self.s_limit),
+            "s2": (0, self.s_limit),
+            "loc1": self.xr,
+            "loc2_loc1": (0, dx),
+            "scale1": (0.0001 * dx, 0.5 * dx),
+            "b": (0, None),
         }
 
         @nb.njit
         def model(x, s1, s2, loc1, loc2_loc1, scale1, b):
-            return (s1 * norm.pdf(x, loc1, scale1)
-                    + s2 * norm.pdf(x, loc1 + loc2_loc1, scale1) + b)
+            return (
+                s1 * norm.pdf(x, loc1, scale1)
+                + s2 * norm.pdf(x, loc1 + loc2_loc1, scale1)
+                + b
+            )
 
         @nb.njit
         def derivative(x, s1, s2, loc1, loc2_loc1, scale1, b):
-            return (-s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
-                    - s2 * norm.pdf(x, loc1 + loc2_loc1, scale1) * (x - loc1 - loc2_loc1) / scale1**2)
+            return (
+                -s1 * norm.pdf(x, loc1, scale1) * (x - loc1) / scale1**2
+                - s2
+                * norm.pdf(x, loc1 + loc2_loc1, scale1)
+                * (x - loc1 - loc2_loc1)
+                / scale1**2
+            )
 
         return model, derivative, params, limits

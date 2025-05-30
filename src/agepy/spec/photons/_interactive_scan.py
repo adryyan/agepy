@@ -86,7 +86,7 @@ class SpectrumViewer(MainWindow):
 
         y, yerr, xe = self.scan.spectrum_at(
             self.step,
-            self.bins,
+            bins=self.bins,
             qeff=self.calc_options["qeff"].isChecked,
             bkg=self.calc_options["bkg"].isChecked,
             calib=self.calc_options["calib"].isChecked,
