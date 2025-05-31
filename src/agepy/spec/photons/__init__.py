@@ -1,3 +1,7 @@
+from .spectrum import Spectrum
+from .scan import Scan
+from .qeff import QEffScan
+from .energy_scan import EnergyScan
 from .anodes import (
     available_anodes,
     PocoAnode,
@@ -10,10 +14,6 @@ from .anodes import (
     Old_WsaAnode,
     Old_DldAnode,
 )
-from .spectrum import Spectrum
-from .scan import Scan
-from .qeff import QEffScan
-from .energy_scan import EnergyScan
 
 __all__ = [
     # Spectrum
