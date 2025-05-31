@@ -306,7 +306,7 @@ class Spectrum:
     def counts(
         self,
         roi: ArrayLike = ((0, 1), (0, 1)),
-        bkg: Spectrum | float | int = 0,
+        bkg: Spectrum | float | int | None = None,
     ) -> tuple[float, float]:
         """Get the number of counts in the spectrum and the estimated
         uncertainty.
@@ -371,10 +371,10 @@ class Spectrum:
             val = max(val - bkg_val, 0)
             err = np.sqrt(err**2 + bkg_err**2)
 
-        elif isinstance(bkg, int) or isinstance(bkg, float):
+        elif isinstance(bkg, (int, float)):
             val = max(val - bkg, 0)
 
-        else:
+        elif bkg is not None:
             errmsg = "bkg must be Spectrum, int or float"
             raise TypeError(errmsg)
 

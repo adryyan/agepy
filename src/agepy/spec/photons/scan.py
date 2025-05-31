@@ -74,7 +74,7 @@ class BaseScan:
             self._m_id.extend([m_id] * len(steps))
 
         # Convert to numpy arrays
-        self._steps = np.asrray(self._steps, dtype=np.float64)
+        self._steps = np.asarray(self._steps, dtype=np.float64)
         self._spectra = np.asarray(self._spectra, dtype=object)
         self._m_id = np.asarray(self._m_id, dtype="<U3")
 
@@ -82,7 +82,7 @@ class BaseScan:
         inds = np.argsort(self._steps)
         self._steps = self._steps[inds]
         self._spectra = self._spectra[inds]
-        self._id = self._id[inds]
+        self._m_id = self._m_id[inds]
 
         # Initialize attributes
         self.roi = roi  # Region of interest for the detector
@@ -148,7 +148,7 @@ class BaseScan:
                 # Format the normalization values
                 try:
                     for name_norm, data_norm in normalize.items():
-                        if isinstance(data_norm, h5.Group):
+                        if isinstance(data_norm, h5py.Group):
                             # Check if the step is present
                             if step not in data_norm:
                                 raise KeyError()
@@ -227,7 +227,7 @@ class BaseScan:
     def m_id(self) -> NDArray:
         return self._m_id
 
-    @id.setter
+    @m_id.setter
     def id(self, measurement_id: NDArray) -> None:
         raise AttributeError("Attribute 'id' is read-only.")
 
