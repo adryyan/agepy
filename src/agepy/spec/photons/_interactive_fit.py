@@ -90,6 +90,10 @@ class Gaussian(FitModel):
     def cdf(x, par):
         return par[0] * norm.cdf(x, *par[1:])
 
+    @staticmethod
+    def der(x, par):
+        return -par[0] * norm.pdf(x, *par[1:]) * (x - par[1]) / par[2] ** 2
+
     def limits(self, n_max):
         dx = self.xr[1] - self.xr[0]
 
@@ -346,6 +350,9 @@ class Constant(FitModel):
 
     def cdf(self, x, par):
         return par[0] * uniform.cdf(x, self.xr[0], self.xr[1] - self.xr[0])
+
+    def der(self, x, par):
+        return np.zeros_like(x)
 
     def limits(self):
         return {"b": (0, None)}

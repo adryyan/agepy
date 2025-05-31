@@ -10,10 +10,9 @@ except ImportError as e:
 try:
     from iminuit import Minuit, cost
     from iminuit.qtwidget import make_widget
-    from numba_stats import norm, uniform
 
 except ImportError as e:
-    errmsg = "iminuit and numba_stats required for fitting."
+    errmsg = "iminuit required for fitting."
     raise ImportError(errmsg) from e
 
 import numpy as np
@@ -23,6 +22,7 @@ import matplotlib.pyplot as plt
 
 from agepy.interactive import MainWindow
 from ._assignment_dialog import AssignmentDialog
+from ._interactive_fit import Gaussian, Constant
 from agepy import ageplot
 
 from typing import TYPE_CHECKING
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
     from numpy.typing import NDArray, ArrayLike
     from .energy_scan import EnergyScan
+    from ._interactive_fit import FitModel
 
 
 class AssignPhex(MainWindow):
@@ -657,77 +658,3 @@ class InteractiveFit(QtWidgets.QDialog):
         self.sig2.cov = self.sig2.err**2
 
         return self.sig1, self.sig2
-
-
-class FitModel:
-    def __init__(
-        self,
-        xr: tuple[float, float],
-    ) -> None:
-        self.xr = xr
-
-        # Fit results
-        self.val = None
-        self.err = None
-        self.cov = None
-
-    def __call__(self, x: NDArray) -> tuple[NDArray, NDArray]:
-        if self.cov is None:
-            raise ValueError("Fit results are not available.")
-
-        # Propagate the uncertainties
-        y, yerr = propagate(lambda par: self.pdf(x, par), self.val, self.cov)
-
-        return y, np.sqrt(np.diag(yerr))
-
-    def start_val(self, n):
-        if self.val is not None:
-            return {k: v for k, v in zip(self.par, self.val)}
-
-        else:
-            return self._start_val(n)
-
-
-class Gaussian(FitModel):
-    name = "Gaussian"
-    par = ["s", "loc", "scale"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * norm.pdf(x, *par[1:])
-
-    @staticmethod
-    def der(x, par):
-        return -par[0] * norm.pdf(x, *par[1:]) * (x - par[1]) / par[2] ** 2
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        return {
-            "s": n,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0]),
-        }
-
-
-class Constant(FitModel):
-    par = ["b"]
-
-    def pdf(self, x, par):
-        return par[0] * uniform.pdf(x, self.xr[0], self.xr[1] - self.xr[0])
-
-    def der(self, x, par):
-        return np.zeros_like(x)
-
-    def limits(self):
-        return {"b": (0, None)}
-
-    def start_val(self):
-        return {"b": 1}
