@@ -79,14 +79,13 @@ class SpectrumViewer(MainWindow):
 
     def plot(self) -> None:
         # Recalculate the spectrum
-
         self.y, self.yerr, self.xe = self.scan.spectrum_at(
             self.step,
             bins=self.bins,
-            qeff=self.calc_options["qeff"].isChecked,
-            bkg=self.calc_options["bkg"].isChecked,
-            calib=self.calc_options["calib"].isChecked,
-            mc_errors=self.calc_options["montecarlo"].isChecked,
+            qeff=self.calc_options["qeff"].isChecked(),
+            bkg=self.calc_options["bkg"].isChecked(),
+            calib=self.calc_options["calib"].isChecked(),
+            mc_errors=self.calc_options["montecarlo"].isChecked(),
         )
 
         # Plot the spectrum

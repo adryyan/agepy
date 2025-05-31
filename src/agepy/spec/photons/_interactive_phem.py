@@ -144,10 +144,10 @@ class AssignPhem(SpectrumViewer):
                 n_std=1,
                 normalize=True,
                 bins=self.bins,
-                qeff=self.calc_options["qeff"].isChecked,
-                bkg=self.calc_options["bkg"].isChecked,
+                qeff=self.calc_options["qeff"].isChecked(),
+                bkg=self.calc_options["bkg"].isChecked(),
                 calib=False,
-                mc_errors=self.calc_options["montecarlo"].isChecked,
+                mc_errors=self.calc_options["montecarlo"].isChecked(),
             )
 
         with ageplot.context(["age", "interactive"]):
