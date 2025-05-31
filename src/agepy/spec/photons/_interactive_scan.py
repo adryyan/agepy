@@ -25,8 +25,6 @@ if TYPE_CHECKING:
 
 
 class SpectrumViewer(MainWindow):
-    """Show all spectra in a scan."""
-
     def __init__(self, scan: Scan, bins: int | ArrayLike) -> None:
         # Set up the main window
         super().__init__(title="Spectrum Viewer")
@@ -51,6 +49,9 @@ class SpectrumViewer(MainWindow):
 
         # Remember current step
         self.step = 0
+
+        # Store current spectrum
+        self.y, self.yerr, self.xe = None, None, None
 
         # Plot the first step
         self.plot()
@@ -84,7 +85,7 @@ class SpectrumViewer(MainWindow):
         else:
             uncertainties = "poisson"
 
-        y, yerr, xe = self.scan.spectrum_at(
+        self.y, self.yerr, self.xe = self.scan.spectrum_at(
             self.step,
             bins=self.bins,
             qeff=self.calc_options["qeff"].isChecked,
@@ -99,13 +100,13 @@ class SpectrumViewer(MainWindow):
             self.ax.clear()
 
             # Plot the spectrum
-            self.ax.stairs(y, xe, color=ageplot.colors[0])
+            self.ax.stairs(self.y, self.xe, color=ageplot.colors[0])
 
             # Plot the uncertainties
             self.ax.stairs(
-                y + yerr,
-                xe,
-                baseline=y - yerr,
+                self.y + self.yerr,
+                self.xe,
+                baseline=self.y - self.yerr,
                 color=ageplot.colors[0],
                 alpha=0.5,
                 fill=True,

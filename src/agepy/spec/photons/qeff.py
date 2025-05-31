@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
+import warnings
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
 from .scan import Scan
+from .util import parse_calib
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Union, Tuple, Literal, Sequence
-    from numpy.typing import NDArray
+    from numpy.typing import NDArray, ArrayLike
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
-    from agepy.spec.photons.anodes import PositionAnode
-
-    type RegionOfInterest = Tuple[Tuple[float, float], Tuple[float, float]]
-    type QuantumEfficiency = Tuple[NDArray, NDArray, NDArray]
-    type WavelengthCalib = Tuple[Tuple[float, float], Tuple[float, float]]
-    type ErrorPropagation = Literal["montecarlo", "none"]
+    from .anodes import PositionAnode
 
 
 class QEffScan(Scan):
@@ -28,45 +24,60 @@ class QEffScan(Scan):
 
     Parameters
     ----------
-    data_files: Sequence[str]
-        List of data files to be processed.
+    data_files: array_like
+        List of data files (str) to be processed.
     anode: PositionAnode
-        Anode object from `agepy.spec.photons`.
+        Anode object to process the raw data.
     raw: str, optional
-        Path to the raw data in the data files. Default:
-        "dld_rd#raw/0".
+        Path to the raw data in the data files.
     time_per_step: int, optional
-        Time per step in the scan. Default: None.
-    **norm
-        Path to normalization parameters in the h5 data files.
+        Time per step in the scan.
+    roi: array_like, shape (2,2), optional
+        Region of interest for the detector in the form
+        `((xmin, xmax), (ymin, ymax))`.
+    **normalize: str
+        Path to additional normalization parameters as keyword
+        arguments like the upstream intensity or target density.
 
     Attributes
     ----------
-    spectra: np.ndarray
+    spectra: np.ndarray, shape (N,)
         Array of the loaded Spectrum objects.
-    energies: np.ndarray
+    steps: np.ndarray, shape (N,)
         Array of the scan variable values.
+    m_id: np.ndarray, shape (N,)
+        Array of the measurement numbers.
+    roi: np.ndarray, shape (2,2)
+        Region of interest for the detector.
+    qeff: [np.ndarray, np.ndarray, np.ndarray] or None
+        Detector efficiencies in the form `(values, errors, x)`
+        with shapes (M,).
 
     """
 
     def __init__(
         self,
-        data_files: Sequence[str],
+        data_files: str | ArrayLike,
         anode: PositionAnode,
         raw: str = "dld_rd#raw",
-        time_per_step: Union[int, Sequence[int]] = None,
-        roi: dict = None,
-        **norm,
+        time_per_step: int | ArrayLike | None = None,
+        roi: ArrayLike = ((0, 1), (0, 1)),
+        **normalize: str,
     ) -> None:
-        # Force the x roi to cover the full detector
-        if roi is not None:
-            roi[0][0] = 0
-            roi[0][1] = 1
-
         # Load and process data
         super().__init__(
-            data_files, anode, None, raw, time_per_step, roi, **norm
+            data_files,
+            anode,
+            scan_var=None,
+            raw=raw,
+            time_per_step=time_per_step,
+            roi=roi,
+            **normalize,
         )
+
+        # Force the x roi to cover the full detector
+        self.roi[0, 0] = 0
+        self.roi[0, 1] = 1
 
         # Initialize the result arrays
         n = len(self.steps)
@@ -76,21 +87,27 @@ class QEffScan(Scan):
         self._pxerr = np.zeros(n, dtype=np.float64)
 
     @property
-    def calib(self) -> None:
-        return None
+    def calib(self) -> NDArray:
+        return self._calib
 
     @calib.setter
-    def calib(self, value) -> None:
-        raise AttributeError("Calibration can not be set for QEffScan.")
+    def calib(self, calib: ArrayLike) -> None:
+        if calib != ((0, 0), (1, 0)):
+            wrnmsg = "Cannot set custom calib for QEffScan."
+            warnings.warn(wrnmsg, stacklevel=1)
+
+        self._calib = parse_calib((0, 0), (1, 0))
 
     @property
-    def qeff(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def qeff(self) -> tuple[NDArray, NDArray, NDArray] | None:
         # Remove zeros
         inds = np.argwhere(self._py > 0).flatten()
 
         # Check if there are any non-zero values
         if len(inds) == 0:
-            raise ValueError("Quantum Efficiency is not evaluated.")
+            wrnmsg = "Quantum Efficiency is not evaluated."
+            warnings.warn(wrnmsg, stacklevel=1)
+            return None
 
         px = self._px[inds]
         py = self._py[inds]
@@ -105,64 +122,100 @@ class QEffScan(Scan):
         return py[inds] / ymax, pyerr[inds] / ymax, px[inds]
 
     @qeff.setter
-    def qeff(self, value) -> None:
-        raise AttributeError("Quantum efficiency can not be set for QEffScan.")
+    def qeff(
+        self, qeff: tuple[NDArray, NDArray, NDArray] | Scan | None
+    ) -> None:
+        if qeff is not None:
+            wrnmsg = "Cannot manually set qeff for QEffScan."
+            warnings.warn(wrnmsg, stacklevel=1)
+
+        self._qeff = None
 
     def interpolate(
         self,
-        x: np.ndarray,
+        x: ArrayLike,
         mc_samples: int = 10000,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[NDArray, NDArray]:
         # Get the fit values
         qeff = self.qeff
+
         if qeff is not None:
             py, pyerr, px = qeff
 
         else:
-            raise ValueError("Quantum efficiency is not evaluated.")
-
-        # Interpolate the efficiencies
-        def interp(y):
-            return np.interp(x, px, y)
+            errmsg = "Quantum efficiency is not evaluated."
+            raise ValueError(errmsg)
 
         # Generate samples
         rng = np.random.default_rng()
         y_samples = rng.normal(loc=py, scale=pyerr, size=(mc_samples, len(py)))
-        eff_samples = np.stack([interp(y) for y in y_samples], axis=0)
+        eff_samples = np.stack(
+            [np.interp(x, px, y, left=0, right=0) for y in y_samples], axis=0
+        )
 
         # Calculate the mean and standard deviation
-        eff = np.mean(eff_samples, axis=0)
-        err = np.std(eff_samples, axis=0)
+        eff = np.mean(eff_samples, axis=0, keepdims=True)
+        err = np.std(eff_samples, axis=0, ddof=1, mean=eff)
+        eff = eff.flatten()
 
-        # Set values outside the interpolation range to 0
-        eff[x < px[0]] = 0
-        eff[x > px[-1]] = 0
-        err[x < px[0]] = 0
-        err[x > px[-1]] = 0
         return eff, err
 
-    def interactive(self, bins: int = 512, sig="Voigt", bkg="None") -> int:
-        """Plot the spectra in an interactive window."""
-        from agepy.interactive import get_qapp
-        from agepy.spec.interactive.photons_qeff import EvalQEff
+    def interactive(
+        self, bins: int | ArrayLike = 512, sig="Voigt", bkg="None"
+    ) -> int:
+        """Interactively evaluate the quantum efficiencies by fitting
+        peaks in the spectra.
 
-        # Create the edges
-        edges = np.histogram([], bins=bins, range=(0, 1))[1]
+        Parameters
+        ----------
+        bins: int or array_like
+            Bin number or edges between 0 and 1.
+        sig: str
+            The default signal model to use for fits. Can be changed
+            in the interactive fit window.
+        bkg: str
+            The default background model to use for fits. Can be
+            changed in the interactive fit window.
+
+        """
+        from agepy.interactive import get_qapp
+        from ._interactive_qeff import EvalQEff
 
         # Get the Qt application
         app = get_qapp()
 
         # Intialize the viewer
-        mw = EvalQEff(self, edges, sig, bkg)
+        mw = EvalQEff(self, bins, sig, bkg)
         mw.show()
 
         # Run the application
         return app.exec()
 
     def plot(
-        self, ax: Axes = None, color: str = "k", label: str = None
-    ) -> Tuple[Figure, Axes]:
-        """Plot the calculated detector efficiencies."""
+        self,
+        ax: Axes | None = None,
+        color: str = "k",
+        label: str | None = None,
+    ) -> tuple[Figure, Axes]:
+        """Plot the calculated detector efficiencies.
+
+        Parameters
+        ----------
+        ax: Axes, optional
+            A matplotlib axes to draw on.
+        color: str, optional
+            A color to use for the efficiencies.
+        label: str, optional
+            A label for the plotted data.
+
+        Returns
+        -------
+        fig: Figure
+            The matplotlib figure.
+        ax: Axes
+            The matplotlib axes.
+
+        """
         # Create the figure and axis
         if ax is None:
             fig, ax = plt.subplots()
@@ -170,13 +223,12 @@ class QEffScan(Scan):
         else:
             fig = ax.get_figure()
 
-        # Plot fit values
-        qeff = self.qeff
-        if qeff is not None:
-            y, yerr, x = qeff
+        # Get the interpolated efficiencies
+        x_interp = np.linspace(0, 1, 1000)
+        eff, err = self.interpolate(x_interp)
 
-        else:
-            raise ValueError("Quantum efficiency is not evaluated.")
+        # Get the fit values
+        y, yerr, x = self.qeff
 
         ax.errorbar(x, y, yerr=yerr, fmt="s", color=color, label=label)
 
@@ -185,10 +237,8 @@ class QEffScan(Scan):
         ax.set_ylim(ylim)
 
         # Plot the interpolated values
-        x = np.linspace(0, 1, 1000)
-        eff, err = self.interpolate(x)
-        ax.plot(x, eff, color=color, linestyle="-")
-        ax.fill_between(x, eff - err, eff + err, color=color, alpha=0.3)
+        ax.plot(x_interp, eff, color=color, linestyle="-")
+        ax.fill_between(x_interp, eff - err, eff + err, color=color, alpha=0.3)
 
         # Set ylim back to auto
         ax.set_ylim(auto=True)
@@ -211,19 +261,11 @@ class QEffScan(Scan):
             Path to the file where the qeff will be saved.
 
         """
+        qeff = self.qeff
+
+        if qeff is None:
+            errmsg = "Quantum efficiency is not evaluated."
+            raise ValueError(errmsg)
+
         with open(filepath, "wb") as f:
-            pickle.dump(self.qeff, f)
-
-    @staticmethod
-    def load(filepath: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Load the evaluated quantum efficiencies.
-
-        Parameters
-        ----------
-        filepath: str
-            Path to the file where the qeff is saved.
-
-        """
-        with open(filepath, "rb") as f:
-            return pickle.load(f)
+            pickle.dump(qeff, f)
