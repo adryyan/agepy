@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 import numpy as np
 from numba import njit, prange
 from jacobi import propagate
@@ -16,7 +15,6 @@ from .util import parse_roi, parse_calib, parse_qeff
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Literal
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
     from numpy.typing import ArrayLike, NDArray
@@ -397,9 +395,10 @@ class Spectrum:
         qeff: tuple[NDArray, NDArray, NDArray] | None = None,
         bkg: Spectrum | None = None,
         calib: ArrayLike = ((0, 0), (1, 0)),
-        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
+        mc_errors: bool = True,
         mc_samples: int = 10000,
         mc_seed: int | None = None,
+        mc_spectrum: bool = False,
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
@@ -428,17 +427,18 @@ class Spectrum:
             `((a0, err), (a1, err))`, where `a0` and `a1`
             correspond to $\\lambda = a_1 x + a_0$ and `err` to the
             respective uncertainties.
-        uncertainties: Literal["montecarlo", "poisson"], optional
-            Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration. If
-            `qeff = None` and `calib = None`, this setting has no
-            effect. Can be 'montecarlo', or 'none'.
+        mc_errors: bool, optional
+            Wether to use Monte Carlo error propagation to calculate
+            the returned uncertainties (CPU and memory intensive).
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
             Has no effect if `err_prop = 'none'`.
         mc_seed: int, optional
             Seed for the numpy random generator.
             See `numpy.random.Generator`.
+        mc_spectrum: bool, optional
+            Wether to return the mean of the Monte Carlo error
+            propagation as the spectrum.
 
         Returns
         -------
@@ -457,10 +457,12 @@ class Spectrum:
         calib = parse_calib(calib)
 
         # Parse the xedges
-        xrange = (calib[0, 0], calib[0, 0] + calib[1, 0])
-        xrange = (min(xrange), max(xrange))
-        xedges = np.histogram([], bins=bins, range=xrange)[1]
-        nbins = xedges.shape[0] - 1
+        ran = (calib[0, 0], calib[0, 0] + calib[1, 0])
+        ran = (min(ran), max(ran))
+        edges = np.histogram([], bins=bins, range=ran)[1]
+
+        # Get the number of bins
+        nbins = len(edges) - 1
 
         # Parse the region of interest
         roi = parse_roi(roi)
@@ -473,12 +475,14 @@ class Spectrum:
         data = data[:, 0].flatten()
 
         if data.shape == (0,):
-            wrnmsg = "Empty region of interest."
-            warnings.warn(wrnmsg, stacklevel=1)
-            return np.zeros(nbins), np.zeros(nbins)
+            return np.zeros(nbins), np.zeros(nbins), edges
 
         # Prepare the background subtraction
+        subtr_bkg = False
+
         if bkg is not None:
+            subtr_bkg = True
+
             # Test if background and data both have a time value
             if bkg._t is None or self._t is None:
                 errmsg = "Both background and data must have a time value."
@@ -501,96 +505,99 @@ class Spectrum:
         # Adjust x roi filter to wavelength binning
         wl_min = calib[1, 0] * roi[0, 0] + calib[0, 0]
         wl_max = calib[1, 0] * roi[0, 1] + calib[0, 0]
-        roi = np.argwhere((xedges < wl_min) | (xedges > wl_max)).flatten()
+        roi = np.argwhere((edges < wl_min) | (edges > wl_max)).flatten()[:-1]
 
         # Parse the quantum efficiencies
+        corr_qeff = False
+
         if qeff is not None:
+            corr_qeff = True
             qeff = parse_qeff(*qeff)
 
-        if uncertainties == "montecarlo":
+        # Calibrate the data
+        calib_data = calib[1, 0] * data + calib[0, 0]
+
+        # Histogram the data
+        spec = np.histogram(calib_data, bins=edges)[0]
+        spec = np.asarray(spec, dtype=np.float64)
+        err = np.sqrt(spec)
+
+        if subtr_bkg:
+            bkg_spec = np.histogram(bkg_data, bins=edges)[0]
+            bkg_spec = np.asarray(bkg_spec, dtype=np.float64)
+
+            # Adjust for measurement duration
+            bkg_spec *= bkg_ratio
+            bkg_err = np.sqrt(bkg_spec)
+
+            # Subtract background
+            spec -= bkg_spec
+            spec[spec < 0] = 0
+            err = np.sqrt(err**2 + bkg_err**2)
+
+        if corr_qeff:
+            qeff_val = qeff[0].copy()
+            qeff_err = qeff[1].copy()
+            qeff_x = qeff[2].copy()
+            n_qeff = len(qeff_val)
+
+            # Interpolate the quantum efficiencies
+            xe = edges / calib[1, 0] - calib[0, 0] / calib[1, 0]
+            x = (xe[1:] + xe[:-1]) * 0.5
+
+            # Propagate the uncertainties with MC
+            rng = np.random.default_rng(mc_seed)
+            qeff_samples = rng.normal(
+                loc=qeff_val, scale=qeff_err, size=(mc_samples, n_qeff)
+            )
+            qeff_samples = np.stack(
+                [
+                    np.interp(x, qeff_x, sample, left=0, right=0)
+                    for sample in qeff_samples
+                ],
+                axis=0,
+            )
+
+            # Calculate the mean and standard deviation
+            qeff_val = np.mean(qeff_samples, axis=0, keepdims=True)
+            qeff_err = np.std(qeff_samples, axis=0, ddof=1, mean=qeff_val)
+            qeff_val = qeff_val.flatten()
+
+            # Propagate the uncertainty
+            nz = qeff_val > 0
+            err[nz] = np.sqrt(
+                err[nz] ** 2 / qeff_val[nz] ** 2
+                + spec[nz] ** 2 / qeff_val[nz] ** 4 * qeff_err[nz] ** 2
+            )
+
+            # Correct for the quantum efficiency
+            spec[nz] = spec[nz] / qeff_val[nz]
+
+            # Set spectrum to 0 where qeff is 0
+            spec[~nz] = 0
+            err[~nz] = 0
+
+        if mc_errors:
             # Initialize the random number generator
             rng = np.random.default_rng(mc_seed)
 
             # Initialize array for storing the sample results
-            mc_spec = np.zeros((mc_samples, nbins), dtype=np.float64)
+            spec_samples = np.zeros((mc_samples, nbins), dtype=np.float64)
 
-            mc_spec = montecarlo_spectrum(
-                mc_spec, data, xedges, rng, mc_samples, calib, bkg, qeff
+            spec_samples = montecarlo_spectrum(
+                spec_samples, data, edges, rng, mc_samples, calib, bkg, qeff
             )
 
             # Calculate mean and standard deviation of the sampled spectra
-            spec = np.mean(mc_spec, axis=0, keepdims=True)
-            err = np.std(mc_spec, ddof=1, axis=0, mean=spec)
-            spec = spec.flatten()
+            mean = np.mean(spec_samples, axis=0, keepdims=True)
+            err = np.std(spec_samples, ddof=1, axis=0, mean=mean)
 
             # Make sure the memory is released
-            del mc_spec
+            del spec_samples
 
-        elif uncertainties == "poisson":
-            # Calibrate the data
-            data = calib[1, 0] * data + calib[0, 0]
-
-            # Histogram the data without the efficiencies
-            spec = np.histogram(data, bins=xedges)[0]
-            spec = np.asarray(spec, dtype=np.float64)
-            err = np.sqrt(spec)
-
-            if bkg is not None:
-                bkg = np.histogram(bkg_data, bins=xedges)[0]
-                bkg = np.asarray(bkg, dtype=np.float64)
-
-                # Adjust for measurement duration
-                bkg *= bkg_ratio
-                bkg_err = np.sqrt(bkg)
-
-                # Subtract background
-                spec -= bkg
-                spec[spec < 0] = 0
-                err = np.sqrt(err**2 + bkg_err**2)
-
-            if qeff is not None:
-                qeff_val, qeff_err, qeff_x = qeff
-
-                n_qeff = len(qeff_val)
-
-                # Jacobi does not like if spectrum and qeff_val have
-                # different shape, so pad qeff_val to the same shape
-                if n_qeff < nbins:
-                    qeff_val = np.pad(qeff_val, (0, nbins - n_qeff))
-                    qeff_err = np.pad(qeff_err, (0, nbins - n_qeff))
-                    qeff_x = np.pad(
-                        qeff_x,
-                        (0, nbins - n_qeff),
-                        mode="linear_ramp",
-                        end_values=2,
-                    )
-
-                xe = xedges / calib[1, 0] - calib[0, 0] / calib[1, 0]
-                x = (xe[1:] + xe[:-1]) * 0.5
-
-                def apply_qeff(spec, eff):
-                    # Interpolate the efficiencies
-                    bin_eff = np.interp(x, qeff_x, eff)
-
-                    # Apply quantum efficiencies
-                    nzero = bin_eff > 0
-                    spec[nzero] /= bin_eff[nzero]
-
-                    return spec
-
-                spec, err = propagate(
-                    apply_qeff,
-                    spec,
-                    err**2,
-                    qeff_val,
-                    qeff_err**2,
-                    diagonal=True,
-                )
-                err = np.sqrt(err).flatten()
-
-        else:
-            errmsg = "uncertainties must be 'montecarlo' or 'poisson'."
-            raise ValueError(errmsg)
+            # Continue with averaged monte carlo spectrum if reqested
+            if mc_spectrum:
+                spec = mean.flatten()
 
         # Normalize data to measurement duration per step
         if self._t is not None:
@@ -607,11 +614,11 @@ class Spectrum:
             spec /= norm_val
 
         # Apply x roi filter
-        spec[roi[:-1]] = 0
-        err[roi[:-1]] = 0
+        spec[roi] = 0
+        err[roi] = 0
 
         # Return the spectrum and uncertainties
-        return spec, err, xedges
+        return spec, err, edges
 
     def transform_norm(self, norm: str, func: callable) -> None:
         """Transform the specified normalization values using a given

@@ -79,11 +79,6 @@ class SpectrumViewer(MainWindow):
 
     def plot(self) -> None:
         # Recalculate the spectrum
-        if self.calc_options["montecarlo"].isChecked:
-            uncertainties = "montecarlo"
-
-        else:
-            uncertainties = "poisson"
 
         self.y, self.yerr, self.xe = self.scan.spectrum_at(
             self.step,
@@ -91,7 +86,7 @@ class SpectrumViewer(MainWindow):
             qeff=self.calc_options["qeff"].isChecked,
             bkg=self.calc_options["bkg"].isChecked,
             calib=self.calc_options["calib"].isChecked,
-            uncertainties=uncertainties,
+            mc_errors=self.calc_options["montecarlo"].isChecked,
         )
 
         # Plot the spectrum

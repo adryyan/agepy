@@ -67,8 +67,7 @@ class EvalQEff(SpectrumViewer):
             self.calc_options["qeff"].setEnabled(False)
 
             # Activate and disable the montecarlo option
-            self.calc_options["montecarlo"].setChecked(True)
-            self.calc_options["montecarlo"].setEnabled(False)
+            self.calc_options["montecarlo"].setChecked(False)
 
             # Activate the other options
             self.calc_options["bkg"].setChecked(False)

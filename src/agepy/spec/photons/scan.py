@@ -13,7 +13,6 @@ from .util import parse_roi, parse_qeff, parse_calib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Literal
     from numpy.typing import NDArray, ArrayLike
     from agepy.spec.photons.anodes import PositionAnode
 
@@ -607,9 +606,10 @@ class Scan(BaseScan):
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
-        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
+        mc_errors: bool = True,
         mc_samples: int = 10000,
         mc_seed: int | None = None,
+        mc_spectrum: bool = False,
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
@@ -629,9 +629,9 @@ class Scan(BaseScan):
             Whether to subtract the background spectrum if available.
         calib: bool, optional
             Whether to apply the wavelength calibration if available.
-        uncertainties: Literal["montecarlo", "poisson"], optional
-            Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration.
+        mc_errors: bool, optional
+            Wether to use Monte Carlo error propagation to calculate
+            the returned uncertainties (CPU and memory intensive).
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
         mc_seed: int, optional
@@ -665,9 +665,10 @@ class Scan(BaseScan):
             qeff=qeff,
             bkg=bkg,
             calib=calib,
-            uncertainties=uncertainties,
+            mc_errors=mc_errors,
             mc_samples=mc_samples,
             mc_seed=mc_seed,
+            mc_spectrum=mc_spectrum,
         )
 
     def spectrum_at_step(
@@ -677,9 +678,10 @@ class Scan(BaseScan):
         qeff: bool = True,
         bkg: bool = True,
         calib: bool = True,
-        uncertainties: Literal["montecarlo", "poisson"] = "montecarlo",
+        mc_errors: bool = True,
         mc_samples: int = 10000,
         mc_seed: int | None = None,
+        mc_spectrum: bool = False,
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Get the spectrum at a specific step.
 
@@ -701,9 +703,9 @@ class Scan(BaseScan):
             Whether to subtract the background spectrum if available.
         calib: bool, optional
             Whether to apply the wavelength calibration if available.
-        uncertainties: Literal["montecarlo", "poisson"], optional
-            Error propagation method for handling the uncertainties of
-            the efficiencies and the wavelength calibration.
+        mc_errors: bool, optional
+            Wether to use Monte Carlo error propagation to calculate
+            the returned uncertainties (CPU and memory intensive).
         mc_samples: int, optional
             Number of Monte Carlo samples to use for error propagation.
         mc_seed: int, optional
@@ -729,9 +731,10 @@ class Scan(BaseScan):
             qeff=qeff,
             bkg=bkg,
             calib=calib,
-            uncertainties=uncertainties,
+            mc_errors=mc_errors,
             mc_samples=mc_samples,
             mc_seed=mc_seed,
+            mc_spectrum=mc_spectrum,
         )
 
     def show_spectra(self):

@@ -95,7 +95,6 @@ class AssignPhem(SpectrumViewer):
 
             # Activate and disable the montecarlo option
             self.calc_options["montecarlo"].setChecked(True)
-            self.calc_options["montecarlo"].setEnabled(False)
 
             # Activate the other options
             self.calc_options["bkg"].setChecked(True)
@@ -148,7 +147,7 @@ class AssignPhem(SpectrumViewer):
                 qeff=self.calc_options["qeff"].isChecked,
                 bkg=self.calc_options["bkg"].isChecked,
                 calib=False,
-                uncertainties="montecarlo",
+                mc_errors=self.calc_options["montecarlo"].isChecked,
             )
 
         with ageplot.context(["age", "interactive"]):
