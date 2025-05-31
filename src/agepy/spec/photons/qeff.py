@@ -96,7 +96,7 @@ class QEffScan(Scan):
             wrnmsg = "Cannot set custom calib for QEffScan."
             warnings.warn(wrnmsg, stacklevel=1)
 
-        self._calib = parse_calib((0, 0), (1, 0))
+        self._calib = parse_calib(((0, 0), (1, 0)))
 
     @property
     def qeff(self) -> tuple[NDArray, NDArray, NDArray] | None:
@@ -105,8 +105,6 @@ class QEffScan(Scan):
 
         # Check if there are any non-zero values
         if len(inds) == 0:
-            wrnmsg = "Quantum Efficiency is not evaluated."
-            warnings.warn(wrnmsg, stacklevel=1)
             return None
 
         px = self._px[inds]

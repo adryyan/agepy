@@ -781,7 +781,7 @@ def montecarlo_spectrum(
         p = rng.poisson(lam=data_counts, size=1)[0]
         poisson_inds = rng.integers(0, data_counts, size=p)
         data_sample = data[poisson_inds]
-        data_eff = data_eff[poisson_inds]
+        data_eff_sample = data_eff[poisson_inds]
 
         if subtr_bkg:
             bkg_sample = bkg_prob[poisson_inds]
@@ -791,7 +791,7 @@ def montecarlo_spectrum(
             bkg_cdf = np.cumsum(bkg_sample)
             remove_inds = np.searchsorted(bkg_cdf, rng.random(p) * bkg_cdf[-1])
             data_sample = np.delete(data_sample, remove_inds)
-            data_eff = np.delete(data_eff, remove_inds)
+            data_eff_sample = np.delete(data_eff, remove_inds)
 
         # Convert x values to wavelengths
         a0_sample = rng.normal(calib[0, 0], calib[0, 1], size=1)[0]
@@ -799,7 +799,9 @@ def montecarlo_spectrum(
         data_sample = a1_sample * data_sample + a0_sample
 
         # Calculate the sum of weights for each bin, i.e. the weighted spectrum
-        spectrum[i] = numba_weighted_histogram(data_sample, xedges, data_eff)
+        spectrum[i] = numba_weighted_histogram(
+            data_sample, xedges, data_eff_sample
+        )
 
     # Return the n generated Monte Carlo spectra
     return spectrum
