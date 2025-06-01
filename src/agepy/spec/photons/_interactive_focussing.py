@@ -18,39 +18,30 @@ except ImportError as e:
     raise ImportError(errmsg) from e
 
 import numpy as np
+from jacobi import propagate
 import matplotlib.pyplot as plt
 
 from ._interactive_scan import SpectrumViewer
-from ._interactive_fit import (
-    Gaussian,
-    QGaussian,
-    Voigt,
-    Cruijff,
-    CrystalBall,
-    CrystalBallEx,
-    Constant,
-    Exponential,
-    Bernstein,
-)
+from ._interactive_fit import Gaussian, Voigt
 from agepy.interactive import _block_signals
 from agepy import ageplot
+
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
     from numpy.typing import NDArray, ArrayLike
-    from .qeff import QEffScan
+    from .focussing import FocusScan
     from ._interactive_fit import FitModel
 
 
-class EvalQEff(SpectrumViewer):
+class EvalFocus(SpectrumViewer):
     def __init__(
         self,
-        scan: QEffScan,
+        scan: FocusScan,
         bins: int | ArrayLike,
         sig: str,
-        bkg: str,
     ) -> None:
         # Set up the main window
         super().__init__(scan, bins)
@@ -67,15 +58,16 @@ class EvalQEff(SpectrumViewer):
             self.calc_options["qeff"].setChecked(False)
             self.calc_options["qeff"].setEnabled(False)
 
-            # Activate and disable the montecarlo option
+            # Disable the montecarlo option
             self.calc_options["montecarlo"].setChecked(False)
+            self.calc_options["montecarlo"].setEnabled(False)
 
-            # Activate the other options
+            # Disablel the background options
             self.calc_options["bkg"].setChecked(False)
+            self.calc_options["bkg"].setEnabled(False)
 
         # Set the default signal and background models
         self.default_sig = sig
-        self.default_bkg = bkg
 
         # Plot the first step
         self.plot()
@@ -107,28 +99,27 @@ class EvalQEff(SpectrumViewer):
         # Get the x selection
         xr = (eclick.xdata, erelease.xdata)
 
+        # Get the xy data
+        x, y = self.scan.spectra[self.step].xy()
+
         # Select the data in the range
-        in_range = np.argwhere(
-            (self.xe >= xr[0]) & (self.xe <= xr[1])
-        ).flatten()
+        in_range = np.argwhere((x >= xr[0]) & (x <= xr[1])).flatten()
+        x = x[in_range]
+        y = y[in_range]
 
-        # Prepare the data
+        # Get x edges
         xe = self.xe[in_range]
-        y = self.y[in_range[:-1]]
-        yerr = self.yerr[in_range[:-1]]
-
-        n = np.stack((y, yerr**2), axis=-1)
 
         # Interactively fit the data
-        debug_fit = InteractiveFit(
-            self, n, xe, sig=self.default_sig, bkg=self.default_bkg
-        )
+        debug_fit = InteractiveFit(self, x, y, xe, sig=self.default_sig)
 
         if debug_fit.exec():
-            res = debug_fit.fit_result()
+            sig1, sig2, res = debug_fit.fit_result()
 
             # Store the fit result
-            self.scan.fit[self.step] = res
+            self.scan.fit[self.step].append(sig1)
+            self.scan.fit[self.step].append(sig2)
+            self.scan.chi2[self.step].append(res["chi2"])
 
         # Close pyplot figures
         plt.close("all")
@@ -143,52 +134,42 @@ class EvalQEff(SpectrumViewer):
 class InteractiveFit(QtWidgets.QDialog):
     sig_models = {
         "Gaussian": lambda xr: Gaussian(xr),
-        "Q-Gaussian": lambda xr: QGaussian(xr),
         "Voigt": lambda xr: Voigt(xr),
-        "Cruijff": lambda xr: Cruijff(xr),
-        "CrystalBall": lambda xr: CrystalBall(xr),
-        "CrystalBallEx": lambda xr: CrystalBallEx(xr),
-    }
-
-    bkg_models = {
-        "None": None,
-        "Constant": lambda xr: Constant(xr),
-        "Exponential": lambda xr: Exponential(xr),
-        "Bernstein1d": lambda xr: Bernstein(1, xr),
-        "Bernstein2d": lambda xr: Bernstein(2, xr),
-        "Bernstein3d": lambda xr: Bernstein(3, xr),
-        "Bernstein4d": lambda xr: Bernstein(4, xr),
     }
 
     def __init__(
         self,
         parent: QtWidgets.QWidget,
-        n: NDArray,
+        x: NDArray,
+        y: NDArray,
         xe: NDArray,
         sig: str = "Voigt",
-        bkg: str = "None",
     ) -> None:
         # Initialize fit data
-        self.n = n
+        self.x = x
+        self.y = y
+
+        # Get the bin edges and centers
         self.xe = xe
+        self.xc = (xe[1:] + x[:-1]) * 0.5
 
         # Set the x range
         self.xr = (xe[0], xe[-1])
 
         # Define starting values and limits
-        nsum = np.sum(n[:, 0])
+        nsum = len(x)
         self.s_start = nsum * 0.9
         self.s_limit = nsum * 1.1
 
-        self.sig = None
-        self.bkg = None
+        self.sig1 = None
+        self.sig2 = None
 
         # Initialize the parameters
         self.params = {}
 
         # Initialize the parent class
         super().__init__(parent)
-        self.setWindowTitle("Quantum Efficiency Fit")
+        self.setWindowTitle("Photon Spectrum Fit")
         self.resize(1280, 720)
         font = QtGui.QFont()
         font.setPointSize(11)
@@ -198,7 +179,7 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Create dummy plot
         self.fit_widget = QtWidgets.QWidget()
-        self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
+        self.layout.addWidget(self.fit_widget, 0, 0, 1, 2)
 
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
@@ -212,24 +193,20 @@ class InteractiveFit(QtWidgets.QDialog):
         self.signal_layout = QtWidgets.QHBoxLayout(self.signal_group)
 
         # Create ComboBox for the first signal component
-        self.sig_comp = QtWidgets.QComboBox()
-        self.sig_comp.addItems(self.sig_models.keys())
-        self.sig_comp.setCurrentIndex(list(self.sig_models.keys()).index(sig))
-        self.sig_comp.currentIndexChanged.connect(self.prepare_fit)
-        self.signal_layout.addWidget(self.sig_comp)
+        self.sig_comp1 = QtWidgets.QComboBox()
+        self.sig_comp1.addItems(self.sig_models.keys())
+        self.sig_comp1.setCurrentIndex(list(self.sig_models.keys()).index(sig))
+        self.sig_comp1.currentIndexChanged.connect(self.prepare_fit)
+        self.signal_layout.addWidget(self.sig_comp1)
+
+        # Create ComboBox for the second signal component
+        self.sig_comp2 = QtWidgets.QComboBox()
+        self.sig_comp2.addItems(list(self.sig_models.keys()) + ["None"])
+        self.sig_comp2.setCurrentIndex(len(self.sig_models))
+        self.sig_comp2.currentIndexChanged.connect(self.prepare_fit)
+        self.signal_layout.addWidget(self.sig_comp2)
 
         self.layout.addWidget(self.signal_group, 1, 0)
-
-        # Create background model selection widget
-        self.background_group = QtWidgets.QGroupBox("Background Model")
-        self.background_group.setSizePolicy(size_policy)
-        self.background_layout = QtWidgets.QHBoxLayout(self.background_group)
-        self.bkg_comp = QtWidgets.QComboBox()
-        self.bkg_comp.addItems(self.bkg_models.keys())
-        self.bkg_comp.setCurrentIndex(list(self.bkg_models.keys()).index(bkg))
-        self.bkg_comp.currentIndexChanged.connect(self.prepare_fit)
-        self.background_layout.addWidget(self.bkg_comp)
-        self.layout.addWidget(self.background_group, 1, 1)
 
         # Create size policy
         size_policy = QtWidgets.QSizePolicy(
@@ -254,14 +231,13 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.addWidget(
             self.button_group,
             1,
-            2,
+            1,
             alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
         )
 
         # Set the column stretch factors
         self.layout.setColumnStretch(0, 1)  # Signal group column
-        self.layout.setColumnStretch(1, 1)  # Background group column
-        self.layout.setColumnStretch(2, 0)  # Button group column
+        self.layout.setColumnStretch(1, 0)  # Button group column
 
         # Create the initial fit widget
         self.prepare_fit()
@@ -271,44 +247,101 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.removeWidget(widget)
         # Set the new fit widget
         self.fit_widget = widget
-        self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
+        self.layout.addWidget(self.fit_widget, 0, 0, 1, 2)
 
     def prepare_fit(self) -> None:
-        # Get the selected signal model
-        sig = self.sig_comp.currentText()
-        self.sig = self.sig_models[sig](self.xr)
+        # Get the selected signal and background models
+        sig1 = self.sig_comp1.currentText()
+        self.sig1 = self.sig_models[sig1](self.xr)
 
-        # Get the selected background model
-        bkg = self.bkg_comp.currentText()
+        sig2 = self.sig_comp2.currentText()
+        if sig2 != "None":
+            self.sig2 = self.sig_models[sig2](self.xr)
+
+        else:
+            self.sig2 = None
 
         # Remember current parameters and limits
         params_prev = self.params.copy()
 
         # Get the first signal model, starting values and limits
-        self.params = self.sig.start_val(self.s_start)
-        limits = self.sig.limits(self.s_limit)
+        par1 = self.sig1.start_val(self.s_start)
+        lim1 = self.sig1.limits(self.s_limit)
 
-        # Initialize the signal and background models
-        if bkg == "None":
+        # Number of parameters for sig1
+        idx1 = len(par1)
 
-            def integral(x, *args):
-                return self.sig.cdf(x, args)
+        # Append a 1 to the parameter names
+        self.params = {f"{k}1": v for k, v in par1.items()}
+        limits = {f"{k}1": v for k, v in lim1.items()}
 
-        else:
-            # Get the background model and parameters
-            self.bkg = self.bkg_models[bkg](self.xr)
+        idx2 = 0
 
-            par = self.bkg.start_val()
-            lim = self.bkg.limits()
+        if self.sig2 is not None:
+            # Get the model and parameters of the second signal component
+            par2 = self.sig2.start_val(self.s_start)
+            lim2 = self.sig2.limits(self.s_limit)
 
-            i = len(self.params)
+            # Append a 2 to the parameter names
+            par2 = {f"{k}2": v for k, v in par2.items()}
+            lim2 = {f"{k}2": v for k, v in lim2.items()}
 
             # Combine the parameters and limits
-            self.params = {**self.params, **par}
-            limits = {**limits, **lim}
+            self.params = {**self.params, **par2}
+            limits = {**limits, **lim2}
 
-            def integral(x, *args):
-                return self.sig.cdf(x, args[:i]) + self.bkg.cdf(x, args[i:])
+            # Shift the loc parameters
+            self.params["loc1"] = 0.4 * (self.xr[1] - self.xr[0]) + self.xr[0]
+            self.params["loc2"] = 0.6 * (self.xr[1] - self.xr[0]) + self.xr[0]
+
+            # Index where the parameters of sig2 end
+            idx2 = len(par2)
+
+        def pdf(x, args):
+            # Signal 1
+            y = self.sig1.pdf(x, args[:idx1])
+
+            # Signal 2
+            if idx2 > 0:
+                y += self.sig2.pdf(x, args[idx1 : idx1 + idx2])
+
+            return y
+
+        self.pdf = pdf
+
+        def density(xy, *args):
+            # Translate and rotated data
+            x = self.transform(args[-3:])
+
+            # Counts
+            n = args[0] + args[idx1]
+
+            return n, pdf(x, args)
+
+        def plot(args):
+            x = self.transform(args[-3:])
+
+            # Histogram the data
+            hist = np.histogram(x, bins=self.xe)[0]
+
+            plt.errorbar(self.xc, hist, yerr=np.sqrt(hist), fmt="ok")
+
+            # Get fit values
+            xf = np.linspace(self.xr[0], self.xr[1], 1000)
+            yf = pdf(xf, args)
+
+            yf *= self.xe[1] - self.xe[0]
+
+            plt.fill_between(x, yf)
+
+        # Add the translation and rotation parameters
+        self.params["theta"] = 0
+        limits["theta"] = (-5, 5)
+
+        self.params["dx"] = 0
+        self.params["dy"] = 0
+        limits["dx"] = (-0.01, 0.01)
+        limits["dy"] = (-0.01, 0.01)
 
         # Keep previous parameters and limits if possible
         for par in params_prev:
@@ -316,7 +349,7 @@ class InteractiveFit(QtWidgets.QDialog):
                 self.params[par] = self.m.values[par]
 
         # Update the cost function
-        c = cost.ExtendedBinnedNLL(self.n, self.xe, integral)
+        c = cost.ExtendedUnbinnedNLL((self.x, self.y), density)
 
         # Update the Minuit object
         self.m = Minuit(
@@ -327,10 +360,8 @@ class InteractiveFit(QtWidgets.QDialog):
         for par, lim in limits.items():
             self.m.limits[par] = lim
 
-        # Update the visualization
-        fit_widget = make_widget(
-            self.m, self.m._visualize(None), {}, False, False
-        )
+        # Update the fit widget
+        fit_widget = make_widget(self.m, plot, {}, False, False)
 
         # Perform the fit
         fit_widget.fit_button.click()
@@ -338,21 +369,74 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def fit_result(self) -> FitModel | None:
+    def transform(self, args):
+        # Shift the x and y values to origin
+        x, y = self.x - 0.5, self.y - 0.5
+
+        # Allow the fit to find a better shift (dx, dy)
+        x = x + args[1]
+        y = y + args[2]
+
+        # Rotate the x and y values
+        cos_theta = np.cos(-np.deg2rad(args[0]))
+        sin_theta = np.sin(-np.deg2rad(args[0]))
+
+        return (cos_theta * x - sin_theta * y) + 0.5
+
+    def fit_result(
+        self,
+    ) -> tuple[FitModel | None, FitModel | None, dict | None]:
         if not self.m.valid:
-            return None
+            return None, None, None
+
+        # Get the translation and rotation
+        res = {
+            "theta": (
+                float(self.m.values["theta"]),
+                float(self.m.errors["theta"]),
+            ),
+            "dx": (float(self.m.values["dx"]), float(self.m.errors["dx"])),
+            "dy": (float(self.m.values["dy"]), float(self.m.errors["dy"])),
+        }
 
         # Get the covariance matrix
         cov = np.array(self.m.covariance)
 
-        # Get the parameter names
-        par = self.sig.par
+        # Get the fit parameter values
+        values = np.array(self.m.values)
+
+        # Calculate chi2
+        x = self.transform(values[-3:])
+        hist = np.histogram(x, bins=self.xe)[0]
+
+        fit, err = propagate(lambda args: self.pdf(self.xc, args), values, cov)
+        err = np.sqrt(np.diag(err))
+
+        res["chi2"] = np.sum((hist - fit) ** 2 / err**2) / self.m.ndof
+
+        # Append 1 to the parameter names
+        par1 = [f"{k}1" for k in self.sig1.par]
 
         # Get fitted parameter values and uncertainties
-        self.sig.val = np.array(self.m.values[par])
-        self.sig.err = np.array(self.m.errors[par])
+        self.sig1.val = np.array(self.m.values[par1])
+        self.sig1.err = np.array(self.m.errors[par1])
 
         # Get the covariance matrix for sig1
-        self.sig.cov = cov[: len(par), : len(par)]
+        self.sig1.cov = cov[: len(par1), : len(par1)]
 
-        return self.sig
+        if self.sig2 is None:
+            return self.sig1, None, res
+
+        # Append 2 to the parameter names
+        par2 = [f"{k}2" for k in self.sig2.par]
+
+        # Get fitted parameter values and uncertainties
+        self.sig2.val = np.array(self.m.values[par2])
+        self.sig2.err = np.array(self.m.errors[par2])
+
+        # Get the covariance matrix for sig2
+        idx1 = len(par1)
+        idx2 = idx1 + len(par2)
+        self.sig2.cov = cov[idx1:idx2, idx1:idx2]
+
+        return self.sig1, self.sig2, res

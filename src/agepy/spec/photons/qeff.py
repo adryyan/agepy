@@ -80,11 +80,7 @@ class QEffScan(Scan):
         self.roi[0, 1] = 1
 
         # Initialize the result arrays
-        n = len(self.steps)
-        self._py = np.zeros(n, dtype=np.float64)
-        self._pyerr = np.zeros(n, dtype=np.float64)
-        self._px = np.zeros(n, dtype=np.float64)
-        self._pxerr = np.zeros(n, dtype=np.float64)
+        self.fit = np.full(len(self.steps), None, dtype=object)
 
     @property
     def calib(self) -> NDArray:
@@ -100,24 +96,33 @@ class QEffScan(Scan):
 
     @property
     def qeff(self) -> tuple[NDArray, NDArray, NDArray] | None:
-        # Remove zeros
-        inds = np.argwhere(self._py > 0).flatten()
+        y, yerr, x = [], [], []
 
-        # Check if there are any non-zero values
-        if len(inds) == 0:
+        # Append the fit results
+        for fit in self.fit:
+            if fit is None:
+                continue
+
+            y.append(fit.value("s"))
+            yerr.append(fit.error("s"))
+            x.append(fit.value("loc"))
+
+        # Return None if fits were performed yet
+        if len(y):
             return None
 
-        px = self._px[inds]
-        py = self._py[inds]
-        pyerr = self._pyerr[inds]
+        # Convert to numpy arrays
+        y = np.asarray(y, dtype=np.float64)
+        yerr = np.asarray(yerr, dtype=np.float64)
+        x = np.asarray(x, dtype=np.float64)
 
         # Normalize the values
-        ymax = np.max(py)
+        ymax = np.max(y)
 
         # Sort the values
-        inds = np.argsort(px)
+        inds = np.argsort(x)
 
-        return py[inds] / ymax, pyerr[inds] / ymax, px[inds]
+        return y[inds] / ymax, yerr[inds] / ymax, x[inds]
 
     @qeff.setter
     def qeff(
@@ -249,7 +254,7 @@ class QEffScan(Scan):
 
         return fig, ax
 
-    def save(self, filepath: str) -> None:
+    def save_qeff(self, filepath: str) -> None:
         """
         Save the evaluated quantum efficiencies.
 
