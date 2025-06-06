@@ -76,24 +76,42 @@ class EvalFocus(SpectrumViewer):
         # Plot the spectrum
         super().plot()
 
-        # Plot the fit
-        fit = self.scan.fit[self.step]
-
-        if fit is not None:
+        for fit in self.scan.fit[self.step]:
+            # Get the fit results for sig1
             x = np.linspace(0, 1, 1000)
-            y, yerr = fit(x)
+            y1, y1err = fit[0](x)
 
             # Scale to the bin width
             dx = self.xe[1] - self.xe[0]
-            y *= dx
-            yerr *= dx
+            y1 *= dx
+            y1err *= dx
+
+            if fit[1] is not None:
+                y2, y2err = fit[1](x)
+
+                y2 *= dx
+                y2err *= dx
 
             with ageplot.context(["age", "interactive"]):
                 # Plot the fit results
-                self.ax.plot(x, y, color=ageplot.colors[1])
+                self.ax.plot(x, y1, color=ageplot.colors[1])
                 self.ax.fill_between(
-                    x, y - yerr, y + yerr, color=ageplot.colors[1], alpha=0.5
+                    x,
+                    y1 - y1err,
+                    y1 + y1err,
+                    color=ageplot.colors[1],
+                    alpha=0.5,
                 )
+
+                if fit[1] is not None:
+                    self.ax.plot(x, y2, color=ageplot.colors[1])
+                    self.ax.fill_between(
+                        x,
+                        y2 - y2err,
+                        y2 + y2err,
+                        color=ageplot.colors[1],
+                        alpha=0.5,
+                    )
 
     def on_select(self, eclick: MouseEvent, erelease: MouseEvent):
         # Get the x selection
@@ -116,10 +134,41 @@ class EvalFocus(SpectrumViewer):
         if debug_fit.exec():
             sig1, sig2, res = debug_fit.fit_result()
 
+            # Current step
+            step = self.step
+
+            # x position
+            loc = sig1.value("loc")
+
+            idx = np.argwhere(
+                (self.loc[step] > xr[0]) & (self.loc[step] < xr[1])
+            )
+
+            if len(idx) == 1:
+                idx = idx.flatten()[0]
+
+            else:
+                idx = len(self.loc[step])
+
             # Store the fit result
-            self.scan.fit[self.step].append(sig1)
-            self.scan.fit[self.step].append(sig2)
-            self.scan.chi2[self.step].append(res["chi2"])
+            self.scan.fit[step] = np.insert(
+                self.scan.fit[step], idx, (sig1, sig2)
+            )
+
+            if sig2 is not None:
+                # Get the mean position
+                loc = (loc + sig2.value("loc")) * 0.5
+
+            # Store results
+            self.scan.loc[step] = np.insert(self.scan.loc[step], idx, loc)
+            self.scan.chi2[step] = np.insert(
+                self.scan.chi2[step], idx, res["chi2"]
+            )
+            self.scan.theta[step] = np.insert(
+                self.scan.theta[step], idx, res["theta"]
+            )
+            self.scan.dx[step] = np.insert(self.scan.dx[step], idx, res["dx"])
+            self.scan.dy[step] = np.insert(self.scan.dy[step], idx, res["dy"])
 
         # Close pyplot figures
         plt.close("all")

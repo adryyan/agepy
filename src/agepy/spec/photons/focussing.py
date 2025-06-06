@@ -73,8 +73,11 @@ class FocusScan(Scan):
 
         # Initialize the result array
         self.fit = np.full(len(self.steps), [], dtype=object)
+        self.loc = np.full(len(self.steps), [], dtype=object)
         self.theta = np.full(len(self.steps), [], dtype=object)
         self.chi2 = np.full(len(self.steps), [], dtype=object)
+        self.dx = np.full(len(self.steps), [], dtype=object)
+        self.dy = np.full(len(self.steps), [], dtype=object)
 
     @property
     def calib(self) -> NDArray:
