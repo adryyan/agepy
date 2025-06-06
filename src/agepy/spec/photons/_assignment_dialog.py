@@ -1,22 +1,13 @@
 from __future__ import annotations
-import warnings
 
-# Import PySide6 / PyQt6 modules
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 
     qt_binding = "PySide6"
 
-except ImportError:
-    warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
-
-    try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
-
-        qt_binding = "PyQt6"
-
-    except ImportError:
-        raise ImportError("No compatible Qt bindings found.")
+except ImportError as e:
+    errmsg = "PySide6 required."
+    raise ImportError(errmsg) from e
 
 __all__ = ["AssignmentDialog"]
 
@@ -35,10 +26,15 @@ class AssignmentDialog(QtWidgets.QDialog):
         row = 0
         for key, value in label.items():
             group = QtWidgets.QGroupBox(key, parent=self)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            sizePolicy = QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
             sizePolicy.setHorizontalStretch(0)
             sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(group.sizePolicy().hasHeightForWidth())
+            sizePolicy.setHeightForWidth(
+                group.sizePolicy().hasHeightForWidth()
+            )
             group.setSizePolicy(sizePolicy)
             layout = QtWidgets.QHBoxLayout(group)
 
@@ -46,7 +42,9 @@ class AssignmentDialog(QtWidgets.QDialog):
                 input_field = QtWidgets.QComboBox(parent=group)
                 input_field.addItems(value)
                 input_field.setEditable(True)
-                input_field.lineEdit().setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                input_field.lineEdit().setAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignCenter
+                )
                 input_field.lineEdit().setReadOnly(True)
             elif isinstance(value, int):
                 input_field = QtWidgets.QSpinBox(parent=group)
@@ -63,7 +61,10 @@ class AssignmentDialog(QtWidgets.QDialog):
 
         self.button_box = QtWidgets.QDialogButtonBox(parent=self)
         self.button_box.setOrientation(QtCore.Qt.Orientation.Horizontal)
-        self.button_box.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Cancel | QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        self.button_box.setStandardButtons(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
         self.grid_layout.addWidget(self.button_box, row // 2 + 1, 0, 1, 2)
 
         self.button_box.accepted.connect(self.accept)  # type: ignore
