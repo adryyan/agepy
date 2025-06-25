@@ -12,6 +12,7 @@ try:
         crystalball,
         crystalball_ex,
         qgaussian,
+        t,
     )
 
 except ImportError as e:
@@ -20,6 +21,7 @@ except ImportError as e:
 
 import numpy as np
 import numba as nb
+from scipy.stats import gennorm
 from jacobi import propagate
 
 from typing import TYPE_CHECKING
@@ -144,6 +146,136 @@ class Voigt(FitModel):
         }
 
 
+class DoubleGaussian(FitModel):
+    name = "Gaussian + Gaussian"
+    par = ["s", "loc", "scale_a", "scale_b", "ratio"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * (
+            par[4] * norm.pdf(x, par[1], par[2])
+            + (1 - par[4]) * norm.pdf(x, par[1], par[3])
+        )
+
+    def cdf(self, x, par):
+        return par[0] * (
+            par[4] * norm.cdf(x, par[1], par[2])
+            + (1 - par[4]) * norm.cdf(x, par[1], par[3])
+        )
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max),
+            "loc": self.xr,
+            "scale_a": (0.001 * dx, dx),
+            "scale_b": (0.0001 * dx, 0.5 * dx),
+            "ratio": (0, 1),
+        }
+
+    def _start_val(self, n):
+        return {
+            "s": n,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale_a": 0.05 * (self.xr[1] - self.xr[0]),
+            "scale_b": 0.5 * (self.xr[1] - self.xr[0]),
+            "ratio": 0.9,
+        }
+
+
+class VoigtBox(FitModel):
+    name = "Voigt + Box"
+    par = ["s", "gamma", "loc", "scale", "ratio", "width"]
+
+    @staticmethod
+    def pdf(x, par):
+        xmin = par[2] - 0.5 * par[5]
+
+        return par[0] * (
+            par[4] * uniform.pdf(x, xmin, par[5])
+            + (1 - par[4]) * voigt.pdf(x, par[1], par[2], par[3])
+        )
+
+    def cdf(self, x, par):
+        xmin = par[2] - 0.5 * par[5]
+
+        _x = np.linspace(self.xr[0], self.xr[1], 1000)
+
+        return par[0] * (
+            par[4] * uniform.cdf(x, xmin, par[5])
+            + (1 - par[4])
+            * num_eval_cdf(x, _x, voigt.pdf(_x, par[1], par[2], par[3]))
+        )
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max),
+            "gamma": (0.00001 * dx, 0.1 * dx),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, dx),
+            "ratio": (0, 1),
+            "width": (0.0001 * dx, 0.5 * dx),
+        }
+
+    def _start_val(self, n):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": n,
+            "gamma": 0.01 * dx,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
+            "ratio": 0.2,
+            "width": 0.05 * (self.xr[1] - self.xr[0]),
+        }
+
+
+class VoigtGaussian(FitModel):
+    name = "Voigt + Gaussian"
+    par = ["s", "gamma", "loc", "scale_voigt", "scale_norm", "ratio"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * (
+            par[5] * voigt.pdf(x, *par[1:4])
+            + (1 - par[5]) * norm.pdf(x, par[2], par[4])
+        )
+
+    def cdf(self, x, par):
+        _x = np.linspace(self.xr[0], self.xr[1], 1000)
+        return par[0] * (
+            par[5] * num_eval_cdf(x, _x, voigt.pdf(_x, *par[1:4]))
+            + (1 - par[5]) * norm.cdf(x, par[2], par[4])
+        )
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max),
+            "gamma": (0.00001 * dx, 0.1 * dx),
+            "loc": self.xr,
+            "scale_voigt": (0.0001 * dx, 0.5 * dx),
+            "scale_norm": (0.0001 * dx, 0.5 * dx),
+            "ratio": (0, 1),
+        }
+
+    def _start_val(self, n):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": n,
+            "gamma": 0.01 * dx,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale_voigt": 0.05 * (self.xr[1] - self.xr[0]),
+            "scale_norm": 0.05 * (self.xr[1] - self.xr[0]),
+            "ratio": 0.5,
+        }
+
+
 class QGaussian(FitModel):
     name = "Q-Gaussian"
     par = ["s", "q", "loc", "scale"]
@@ -189,6 +321,66 @@ class QGaussian(FitModel):
         return {
             "s": n,
             "q": 2,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
+        }
+
+
+class GeneralizedGaussian(FitModel):
+    name = "Generalized Gaussian"
+    par = ["s", "beta", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * gennorm.pdf(x, *par[1:])
+
+    def cdf(self, x, par):
+        return par[0] * gennorm.cdf(x, *par[1:])
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max),
+            "beta": (0, 50),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
+        }
+
+    def _start_val(self, n):
+        return {
+            "s": n,
+            "beta": 2,
+            "loc": 0.5 * (self.xr[0] + self.xr[1]),
+            "scale": 0.05 * (self.xr[1] - self.xr[0]),
+        }
+
+
+class Studentst(FitModel):
+    name = "Student's t"
+    par = ["s", "df", "loc", "scale"]
+
+    @staticmethod
+    def pdf(x, par):
+        return par[0] * t.pdf(x, *par[1:])
+
+    def cdf(self, x, par):
+        return par[0] * t.cdf(x, *par[1:])
+
+    def limits(self, n_max):
+        dx = self.xr[1] - self.xr[0]
+
+        return {
+            "s": (0, n_max),
+            "df": (0, 50),
+            "loc": self.xr,
+            "scale": (0.0001 * dx, 0.5 * dx),
+        }
+
+    def _start_val(self, n):
+        return {
+            "s": n,
+            "df": 1,
             "loc": 0.5 * (self.xr[0] + self.xr[1]),
             "scale": 0.05 * (self.xr[1] - self.xr[0]),
         }

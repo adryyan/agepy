@@ -23,11 +23,16 @@ import matplotlib.pyplot as plt
 from ._interactive_scan import SpectrumViewer
 from ._interactive_fit import (
     Gaussian,
+    DoubleGaussian,
     QGaussian,
     Voigt,
+    VoigtGaussian,
+    GeneralizedGaussian,
+    Studentst,
     Cruijff,
     CrystalBall,
     CrystalBallEx,
+    VoigtBox,
     Constant,
     Exponential,
     Bernstein,
@@ -144,7 +149,12 @@ class InteractiveFit(QtWidgets.QDialog):
     sig_models = {
         "Gaussian": lambda xr: Gaussian(xr),
         "Q-Gaussian": lambda xr: QGaussian(xr),
+        "Generalized Gaussian": lambda xr: GeneralizedGaussian(xr),
+        "Gaussian + Gaussian": lambda xr: DoubleGaussian(xr),
         "Voigt": lambda xr: Voigt(xr),
+        "Voigt + Box": lambda xr: VoigtBox(xr),
+        "Voigt + Gaussian": lambda xr: VoigtGaussian(xr),
+        "Student's t": lambda xr: Studentst(xr),
         "Cruijff": lambda xr: Cruijff(xr),
         "CrystalBall": lambda xr: CrystalBall(xr),
         "CrystalBallEx": lambda xr: CrystalBallEx(xr),
@@ -354,5 +364,8 @@ class InteractiveFit(QtWidgets.QDialog):
 
         # Get the covariance matrix for sig1
         self.sig.cov = cov[: len(par), : len(par)]
+
+        # Get the chi2 / ndof
+        self.sig.chi2 = self.m.fmin.reduced_chi2
 
         return self.sig

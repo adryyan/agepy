@@ -108,7 +108,7 @@ class QEffScan(Scan):
             x.append(fit.value("loc"))
 
         # Return None if fits were performed yet
-        if len(y):
+        if len(y) == 0:
             return None
 
         # Convert to numpy arrays
