@@ -164,7 +164,7 @@ class EnergyScan(Scan):
 
         """
         # Select the spectra corresponding to the measurement number
-        inds = np.argwhere(self.m_id == measurement_id).flatten()
+        inds = np.nonzero(self.m_id == measurement_id)[0]
 
         # Check if the measurement number exists
         if len(inds) == 0:
@@ -189,7 +189,7 @@ class EnergyScan(Scan):
         # Remove the steps
         self._steps = np.delete(self.steps, inds)
         self._spectra = np.delete(self.spectra, inds)
-        self._id = np.delete(self.id, inds)
+        self._m_id = np.delete(self.m_id, inds)
 
         # Remove the uncertainties
         self._energy_uncertainty = np.delete(self._energy_uncertainty, inds)

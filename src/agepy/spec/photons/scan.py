@@ -405,7 +405,7 @@ class BaseScan:
             Path to the file where the scan will be saved.
 
         """
-        if not filepath.endswith(".pkl") or not filepath.endswith(".pickle"):
+        if not (filepath.endswith(".pkl") or filepath.endswith(".pickle")):
             errmsg = "filepath must end with '.pkl' or '.pickle'."
             raise ValueError(errmsg)
 
