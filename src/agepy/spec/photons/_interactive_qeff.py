@@ -200,6 +200,7 @@ class InteractiveFit(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Quantum Efficiency Fit")
         self.resize(1280, 720)
+        self.setMaximumSize(1280, 720)
         font = QtGui.QFont()
         font.setPointSize(11)
         self.setFont(font)
