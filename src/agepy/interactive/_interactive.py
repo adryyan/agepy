@@ -13,7 +13,9 @@ try:
     qt_binding = "PySide6"
 
 except ImportError:
-    warnings.warn("PySide6 not found, trying PyQt6. Some features may not work.")
+    warnings.warn(
+        "PySide6 not found, trying PyQt6. Some features may not work."
+    )
 
     try:
         from PyQt6 import QtWidgets, QtCore, QtGui
@@ -26,7 +28,7 @@ except ImportError:
 # Import matplotlib modules
 from matplotlib.backends.backend_qt5agg import (
     FigureCanvasQTAgg,
-    NavigationToolbar2QT
+    NavigationToolbar2QT,
 )
 from matplotlib.widgets import RectangleSelector
 from matplotlib.figure import Figure
@@ -54,14 +56,14 @@ def get_qapp() -> QtWidgets.QApplication:
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    """Main window.
+    """Main window."""
 
-    """
-    def __init__(self,
+    def __init__(
+        self,
         width: int = 1280,
         height: int = 720,
         title: str = "AGE Interactive",
-        layout: Literal["vertical", "horizontal"] = "vertical"
+        layout: Literal["vertical", "horizontal"] = "vertical",
     ) -> None:
         super().__init__()
         # Set up the window
@@ -82,7 +84,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas = None
         self.toolbar = None
 
-    def add_plot(self,
+    def add_plot(
+        self,
         fig: Figure = None,
         ax: Union[Axes, Sequence[Axes]] = None,
         layout: QtWidgets.QLayout = None,
@@ -125,9 +128,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.layout.addWidget(self.toolbar)
 
-    def add_action_select_data(self,
-        callback: callable,
-        hint: str = "Select Data"
+    def add_action_select_data(
+        self, callback: callable, hint: str = "Select Data"
     ) -> None:
         # Check if a toolbar exists
         if self.toolbar is None:
@@ -144,27 +146,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Add ROI button to toolbar
         actions = self.toolbar.actions()
-        self.button_select_data = self.toolbar.insertAction(actions[-1], action)
+        self.button_select_data = self.toolbar.insertAction(
+            actions[-1], action
+        )
 
-    def add_rect_selector(self,
+    def add_rect_selector(
+        self,
         ax: Axes,
         on_select: callable,
         interactive: bool = True,
-        hint: str = "Select Data"
+        hint: str = "Select Data",
     ) -> None:
         # Add the action
         self.add_action_select_data(self.toggle_selector, hint=hint)
 
         # Create data selector
         self.selector = RectangleSelector(
-            ax, on_select,
+            ax,
+            on_select,
             useblit=True,
             button=[1],
-            minspanx=5, minspany=5,
+            minspanx=5,
+            minspany=5,
             spancoords="pixels",
             interactive=interactive,
             props={"linewidth": 0.83, "linestyle": "--", "fill": False},
-            handle_props={"markersize": 0}
+            handle_props={"markersize": 0},
         )
 
         # Deactivate selector
@@ -173,14 +180,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def toggle_selector(self):
         self.selector.set_active(not self.selector.active)
 
-    def add_forward_backward_action(self,
-        bw_callback: callable,
-        fw_callback: callable
+    def add_forward_backward_action(
+        self, bw_callback: callable, fw_callback: callable
     ) -> None:
         # Check if a toolbar exists
         if self.toolbar is None:
             raise ValueError("No toolbar to add actions to.")
-        
+
         # Get the actions
         actions = self.toolbar.actions()
 
@@ -200,9 +206,8 @@ class MainWindow(QtWidgets.QMainWindow):
         fw.triggered.connect(fw_callback)
         self.fw = self.toolbar.insertAction(actions[-1], fw)
 
-    def add_lookup_action(self,
-        callback: callable,
-        hint: str = "Look Up"
+    def add_lookup_action(
+        self, callback: callable, hint: str = "Look Up"
     ) -> None:
         # Check if a toolbar exists
         if self.toolbar is None:

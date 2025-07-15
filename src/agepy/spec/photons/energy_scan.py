@@ -305,7 +305,7 @@ class EnergyScan(Scan):
 
         # Parse the y edges
         a = self.calib if calib else ((0, 0), (1, 0))
-        ran = (a[0, 0], a[0, 0] + a[1, 0])
+        ran = (a[0][0], a[0][0] + a[1][0])
         ran = (min(ran), max(ran))
         ye = np.histogram([], bins=bins, range=ran)[1]
 
