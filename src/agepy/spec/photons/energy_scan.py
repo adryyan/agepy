@@ -276,11 +276,11 @@ class EnergyScan(Scan):
             Simulation of bound PhexPhem transitions.
 
         """
-        from agepy.interactive import get_qapp
-        from ._interactive_phexphem import PhexPhemViewer
+        from agepy.qt import get_qtapp
+        from .qt_phexphem import PhexPhemViewer
 
         # Get the Qt application
-        app = get_qapp()
+        app = get_qtapp()
 
         # Intialize the viewer
         mw = PhexPhemViewer(self, reference, phem_calib)
@@ -310,11 +310,11 @@ class EnergyScan(Scan):
         ye = np.histogram([], bins=bins, range=ran)[1]
 
         # Create an empty map
-        hist = np.zeros((len(ye) - 1, len(xe) - 1))
-        errors = np.zeros((len(ye) - 1, len(xe) - 1))
+        hist = np.zeros((len(xe) - 1, len(ye) - 1))
+        errors = np.zeros((len(xe) - 1, len(ye) - 1))
 
         # Fill the map
-        weights, _ = np.histogram(self.steps, bins=xe)
+        weights = np.histogram(self.steps, bins=xe)[0].T
         inds = np.digitize(self.steps, xe[1:-1])
 
         for idx in range(len(self.steps)):
@@ -330,12 +330,12 @@ class EnergyScan(Scan):
                 mc_spectrum=mc_spectrum,
             )[:2]
 
-            hist[:, inds[idx]] += spec
-            errors[:, inds[idx]] += err**2
+            hist[inds[idx], :] += spec
+            errors[inds[idx], :] += err**2
 
         # Normalize the map
         weights[weights == 0] = 1
-        hist /= weights
-        errors = np.sqrt(errors / weights**2)
+        hist = np.divide(hist, weights[:, np.newaxis])
+        errors = np.sqrt(np.divide(errors, weights[:, np.newaxis] ** 2))
 
         return hist, errors, xe, ye

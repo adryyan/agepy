@@ -59,7 +59,7 @@ lines.markersize:      3.3      # marker size, in points
 ## relative to font.size, using the following values: xx-small, x-small,
 ## small, medium, large, x-large, xx-large, larger, or smaller
 font.family:  serif
-font.size:    7
+font.size:    16
 
 
 ## ***************************************************************************
@@ -68,12 +68,12 @@ font.size:    7
 ## Following are default face and edge colors, default tick sizes,
 ## default font sizes for tick labels, and so on.  See
 ## https://matplotlib.org/stable/api/axes_api.html#module-matplotlib.axes
-axes.linewidth:     0.6      # edge line width
-axes.titlesize:     7        # font size of the axes title
+axes.linewidth:     1.2      # edge line width
+axes.titlesize:     20       # font size of the axes title
 axes.titleweight:   normal   # font weight of title
-axes.titlepad:      4.0      # pad between axes and title in points
-axes.labelsize:     7        # font size of the x and y labels
-axes.labelpad:      4.0      # space between label and axis
+axes.titlepad:      8.0      # pad between axes and title in points
+axes.labelsize:     18       # font size of the x and y labels
+axes.labelpad:      8.0      # space between label and axis
 axes.labelweight:   normal   # weight of the x and y labels
 
 
@@ -81,35 +81,35 @@ axes.labelweight:   normal   # weight of the x and y labels
 ## * TICKS                                                                   *
 ## ***************************************************************************
 ## See https://matplotlib.org/stable/api/axis_api.html#matplotlib.axis.Tick
-xtick.major.size:    3.5     # major tick size in points
-xtick.minor.size:    2       # minor tick size in points
-xtick.major.width:   0.6     # major tick width in points
-xtick.minor.width:   0.4     # minor tick width in points
-xtick.major.pad:     3.0     # distance to major tick label in points
-xtick.minor.pad:     2.9     # distance to the minor tick label in points
-xtick.labelsize:     6       # font size of the tick labels
+xtick.major.size:    5       # major tick size in points
+xtick.minor.size:    3.5     # minor tick size in points
+xtick.major.width:   1.2     # major tick width in points
+xtick.minor.width:   0.8     # minor tick width in points
+xtick.major.pad:     6.0     # distance to major tick label in points
+xtick.minor.pad:     5.8     # distance to the minor tick label in points
+xtick.labelsize:     14      # font size of the tick labels
 
-ytick.major.size:    3.5     # major tick size in points
-ytick.minor.size:    2       # minor tick size in points
-ytick.major.width:   0.6     # major tick width in points
-ytick.minor.width:   0.4     # minor tick width in points
-ytick.major.pad:     3.0     # distance to major tick label in points
-ytick.minor.pad:     2.9     # distance to the minor tick label in points
-ytick.labelsize:     6       # font size of the tick labels
+ytick.major.size:    5       # major tick size in points
+ytick.minor.size:    3.5     # minor tick size in points
+ytick.major.width:   1.2     # major tick width in points
+ytick.minor.width:   0.8     # minor tick width in points
+ytick.major.pad:     6.0     # distance to major tick label in points
+ytick.minor.pad:     5.8     # distance to the minor tick label in points
+ytick.labelsize:     14      # font size of the tick labels
 
 
 ## ***************************************************************************
 ## * GRIDS                                                                   *
 ## ***************************************************************************
-grid.linewidth: 0.6        # in points
+grid.linewidth: 1.2        # in points
 
 
 ## ***************************************************************************
 ## * LEGEND                                                                  *
 ## ***************************************************************************
 legend.markerscale:   0.5      # the relative size of legend markers vs. original
-legend.fontsize:      7
-legend.title_fontsize: 7       # None sets to the same as the default axes.
+legend.fontsize:      14
+legend.title_fontsize: 14      # None sets to the same as the default axes.
 legend.borderaxespad: 0.75
 legend.handlelength: 1.5
 
@@ -118,12 +118,12 @@ legend.handlelength: 1.5
 ## * FIGURE                                                                  *
 ## ***************************************************************************
 ## See https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure
-figure.titlesize:   7               # size of the figure title (``Figure.suptitle()``)
+figure.titlesize:   20              # size of the figure title (``Figure.suptitle()``)
 figure.titleweight: bold            # weight of the figure title
-figure.labelsize:   7               # size of the figure label (``Figure.sup[x|y]label()``)
+figure.labelsize:   18              # size of the figure label (``Figure.sup[x|y]label()``)
 figure.labelweight: normal          # weight of the figure label
-figure.figsize:     3.375, 2.53125  # figure size in inches
-figure.dpi:         300             # figure dots per inch
+figure.figsize:     9.6, 7.2        # figure size in inches
+figure.dpi:         100             # figure dots per inch
 
 
 ## ***************************************************************************

@@ -17,14 +17,30 @@ colors: list
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
-age_styles = ["age", "tex", "nature", "prl", "pccp", "powerpoint",
-              "latexbeamer", "interactive"]
+age_styles = [
+    "age",
+    "tex",
+    "nature",
+    "prl",
+    "pccp",
+    "powerpoint",
+    "latexbeamer",
+    "qt",
+]
 mpl_styles = ["default"]
 mpl_styles.extend(plt.style.available)
 
 colors = [
-    "#0173b2", "#de8f05", "#029e73", "#d55e00", "#cc78bc", "#ca9161",
-    "#fbafe4", "#949494", "#ece133", "#56b4e9"
+    "#0173b2",
+    "#de8f05",
+    "#029e73",
+    "#d55e00",
+    "#cc78bc",
+    "#ca9161",
+    "#fbafe4",
+    "#949494",
+    "#ece133",
+    "#56b4e9",
 ]
 
 
@@ -138,7 +154,7 @@ def context(styles):
         yield
 
 
-class figsize():
+class figsize:
     """Class for choosing the appropriate size of matplotlib figures.
 
     This class provides access to the width and height of the available
