@@ -16,7 +16,6 @@ except ImportError as e:
     raise ImportError(errmsg) from e
 
 import numpy as np
-from jacobi import propagate
 import pandas as pd
 
 from matplotlib.patches import Ellipse
@@ -24,7 +23,7 @@ import matplotlib.colors as colors
 from agepy.qt import MainWindow
 from agepy.qt.util import BlitManager
 from agepy import ageplot
-from .fit_models import (
+from agepy.spec.fit_models import (
     Gaussian,
     DoubleGaussian,
     QGaussian,
@@ -45,7 +44,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
-    from numpy.typing import NDArray, ArrayLike
+    from numpy.typing import NDArray
     from .energy_scan import EnergyScan
     from ._interactive_fit import FitModel
 
@@ -330,6 +329,7 @@ class InteractiveFit(QtWidgets.QDialog):
     }
 
     bkg_models = {
+        "None": None,
         "Constant": Constant,
         "Exponential": Exponential,
         "Bernstein1d": lambda xr: Bernstein(1, xr),
@@ -347,7 +347,8 @@ class InteractiveFit(QtWidgets.QDialog):
         assignments: list[ReferenceMarker],
         x_sig: str = "Gaussian",
         y_sig: str = "Voigt",
-        bkg: str = "Constant",
+        x_bkg: str = "Constant",
+        y_bkg: str = "None",
     ) -> None:
         self.n, self.xe, self.ye = n, xe, ye
         self.xr = (xe[0], xe[-1])
@@ -413,28 +414,43 @@ class InteractiveFit(QtWidgets.QDialog):
                 "x": x_cbox,
                 "x_fit": None,
                 "x_par": [],
+                "x_idx": [],
                 "y": y_cbox,
                 "y_fit": None,
                 "y_par": [],
+                "y_idx": [],
             }
 
         # Create background model selection widget
         group = QtWidgets.QGroupBox("Background Model")
         group.setSizePolicy(size_policy)
         layout = QtWidgets.QHBoxLayout(group)
-        cbox = QtWidgets.QComboBox()
-        cbox.addItems(self.bkg_models.keys())
-        cbox.setCurrentIndex(list(self.bkg_models.keys()).index(bkg))
-        cbox.currentIndexChanged.connect(self.prepare_fit)
-        layout.addWidget(cbox)
+
+        x_cbox = QtWidgets.QComboBox()
+        x_cbox.addItems(self.bkg_models.keys())
+        x_cbox.setCurrentIndex(list(self.bkg_models.keys()).index(x_bkg))
+        x_cbox.currentIndexChanged.connect(self.prepare_fit)
+        layout.addWidget(x_cbox)
+
+        y_cbox = QtWidgets.QComboBox()
+        y_cbox.addItems(self.bkg_models.keys())
+        y_cbox.setCurrentIndex(list(self.bkg_models.keys()).index(y_bkg))
+        y_cbox.currentIndexChanged.connect(self.prepare_fit)
+        layout.addWidget(y_cbox)
 
         self.layout.addWidget(group, i + 2, 0, 1, 2)
 
         self.bkg = {
             "group": group,
             "layout": layout,
-            "xy": cbox,
-            "fit": None,
+            "x": x_cbox,
+            "x_fit": None,
+            "x_par": [],
+            "x_idx": [],
+            "y": y_cbox,
+            "y_fit": None,
+            "y_par": [],
+            "y_idx": [],
         }
 
         # Create the button box
@@ -458,7 +474,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.addWidget(
             self.button_group,
             i + 2,
-            3,
+            2,
             1,
             1,
             alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
@@ -505,8 +521,8 @@ class InteractiveFit(QtWidgets.QDialog):
             self.sig[i]["y_fit"] = y_fit
 
             x_loc, y_loc = self.assignments[i].get_center()
-            x_scale = self.assignments[i].width * 0.5
-            y_scale = self.assignments[i].height * 0.5
+            x_scale = self.assignments[i].width * 0.1
+            y_scale = self.assignments[i].height * 0.1
 
             self.sig[i]["x_par"] = []
             self.sig[i]["y_par"] = []
@@ -531,7 +547,7 @@ class InteractiveFit(QtWidgets.QDialog):
 
                 elif par == "scale":
                     params[f"scale_x{i}"] = x_scale
-                    limits[f"scale_x{i}"] = (0.01 * x_scale, 2 * x_scale)
+                    limits[f"scale_x{i}"] = (0.01 * x_scale, 5 * x_scale)
 
                 else:
                     params[f"{par}_x{i}"] = x_par[par]
@@ -553,7 +569,7 @@ class InteractiveFit(QtWidgets.QDialog):
 
                 elif par == "scale":
                     params[f"scale_y{i}"] = y_scale
-                    limits[f"scale_y{i}"] = (0.01 * y_scale, 2 * y_scale)
+                    limits[f"scale_y{i}"] = (0.01 * y_scale, 5 * y_scale)
 
                 else:
                     params[f"{par}_y{i}"] = y_par[par]
@@ -564,13 +580,48 @@ class InteractiveFit(QtWidgets.QDialog):
             self.sig[i]["x_idx"] = np.asarray(self.sig[i]["x_idx"])
             self.sig[i]["y_idx"] = np.asarray(self.sig[i]["y_idx"])
 
-        self.params = params
+        x_name = self.bkg["x"].currentText()
+
+        if x_name == "None":
+            self.bkg["x_fit"] = None
+            x_par = {}
+            x_lim = {}
+
+        else:
+            x_fit = self.bkg_models[x_name](self.xr)
+            self.bkg["x_fit"] = x_fit
+            x_par = x_fit.start_val()
+            x_lim = x_fit.limits()
+
+        self.bkg["x_par"] = list(x_par.keys())
+        self.bkg["x_idx"] = np.arange(par_idx, par_idx + len(x_par.keys()))
+
+        par_idx += len(x_par.keys())
+
+        y_name = self.bkg["y"].currentText()
+
+        if y_name == "None":
+            self.bkg["y_fit"] = None
+            y_par = {}
+            y_lim = {}
+
+        else:
+            y_fit = self.bkg_models[y_name](self.yr)
+            self.bkg["y_fit"] = y_fit
+            y_par = y_fit.start_val()
+            y_lim = y_fit.limits()
+
+        self.bkg["y_par"] = list(y_par.keys())
+        self.bkg["y_idx"] = np.arange(par_idx, par_idx + len(y_par.keys()))
+
+        self.params = {**params, **x_par, **y_par}
+        limits = {**limits, **x_lim, **y_lim}
 
         def integral(xe_ye, *args):
             xe, ye = xe_ye
-            print(xe.shape, ye.shape)
+            args = np.asarray(args)
 
-            cdf = np.zeros_like(xe) * np.zeros_like(ye)
+            cdf = np.zeros_like(xe)
             for i in range(self.n_sig):
                 val_x = args[self.sig[i]["x_idx"]]
                 val_y = args[self.sig[i]["y_idx"]]
@@ -579,6 +630,12 @@ class InteractiveFit(QtWidgets.QDialog):
                     * self.sig[i]["y_fit"].cdf(ye, val_y)
                     / val_x[0]
                 )
+
+            if self.bkg["x_fit"] is not None:
+                cdf += self.bkg["x_fit"].cdf(xe, args[self.bkg["x_idx"]])
+
+            if self.bkg["y_fit"] is not None:
+                cdf += self.bkg["y_fit"].cdf(ye, args[self.bkg["y_idx"]])
 
             return cdf
 
@@ -598,6 +655,15 @@ class InteractiveFit(QtWidgets.QDialog):
         # Set the limits
         for par, lim in limits.items():
             self.m.limits[par] = lim
+
+        def plot(args):
+            from matplotlib import pyplot as plt
+
+            fig = plt.gcf()
+            fig.set_figwidth(2 * fig.get_figwidth() / 1.5)
+            _, ax = plt.subplots(1, 2, num=fig.number)
+
+            plt.sca(ax[0])
 
         # Update the visualization
         fit_widget = make_widget(
