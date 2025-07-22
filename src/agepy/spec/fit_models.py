@@ -20,6 +20,7 @@ except ImportError as e:
 
 import warnings
 import numpy as np
+import xarray as xr
 import numba as nb
 from scipy.stats import gennorm
 from jacobi import propagate
@@ -28,6 +29,34 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray, ArrayLike
+
+
+class FitParam:
+    def __init__(
+        self,
+        name: str,
+        val: float = 0,
+        lim: tuple[float | None, float | None] = (None, None),
+    ) -> None:
+        self.name = str(name)
+        self.val = float(val)
+        self.err = 0.0
+        self.lim = lim
+
+
+class YieldParam(FitParam):
+    def __init__(self) -> None:
+        super().__init__("n", val=1, lim=(0, None))
+
+
+class LocParam(FitParam):
+    def __init__(self) -> None:
+        super().__init__("loc", val=0, lim=(None, None))
+
+
+class ScaleParam(FitParam):
+    def __init__(self) -> None:
+        super().__init__("scale", val=1, lim=(0, None))
 
 
 class SumModel:
@@ -126,37 +155,45 @@ class SumModel:
 class SumModel2d(SumModel):
     def density(self, xe_ye, *par):
         par_dict = dict(zip(self.par, par))
-        z = self.np.zeros_like(xe_ye[0])
+        z = np.zeros_like(xe_ye[0])
 
         for m in self.models:
             val = [par_dict[p] for p in self.par_map[m].values()]
             z += self.models[m].density(xe_ye, *val)
 
+        return z
+
     def integral(self, xe_ye, *par):
         par_dict = dict(zip(self.par, par))
-        z = self.np.zeros_like(xe_ye[0])
+        z = np.zeros_like(xe_ye[0])
 
         for m in self.models:
             val = [par_dict[p] for p in self.par_map[m].values()]
             z += self.models[m].integral(xe_ye, *val)
 
+        return z
+
 
 class SumModel1d(SumModel):
     def density(self, x, *par):
         par_dict = dict(zip(self.par, par))
-        y = self.np.zeros_like(x)
+        y = np.zeros_like(x)
 
         for m in self.models:
             val = [par_dict[p] for p in self.par_map[m].values()]
             y += self.models[m].density(x, *val)
 
+        return z
+
     def integral(self, x, *par):
         par_dict = dict(zip(self.par, par))
-        y = self.np.zeros_like(x)
+        y = np.zeros_like(x)
 
         for m in self.models:
             val = [par_dict[p] for p in self.par_map[m].values()]
             y += self.models[m].integral(x, *val)
+
+        return z
 
 
 class FitModel2d:
@@ -296,12 +333,19 @@ class FitModel1d:
     _val: list[float]
     _lim: dict[tuple[float | None, float | None]]
 
-    def __init__(self) -> None:
-        self.val = np.array(self._val)
-        self.err = np.zeros_like(self.val)
-        self.cov = np.zeros_like(self.val)
+    def __init__(
+        self, val: list[float], **lim: tuple[float | None, float | None]
+    ) -> None:
+        self.val = xr.DataArray(val, coords=[("par", self.par)])
+        self.err = xr.DataArray(np.zeros_like(val), coords=[("par", self.par)])
 
-        self.lim = self._lim.copy()
+        self.lim = {}
+        for par in self.par:
+            if par in lim:
+                self.lim[par] = lim[par]
+
+            else:
+                self.lim[par] = (None, None)
 
     def __call__(self, x: NDArray) -> tuple[NDArray, NDArray]:
         y, err = propagate(
@@ -309,13 +353,6 @@ class FitModel1d:
         )
 
         return y, np.sqrt(np.diag(err))
-
-    def params(self, yld: bool = True):
-        if not yld and self.yld:
-            return self.par[1:]
-
-        else:
-            return self.par[:]
 
     def value(self, par: str):
         if par not in self.par:
@@ -342,492 +379,106 @@ class FitModel1d:
 
 class Gaussian(FitModel1d):
     name = "Gaussian"
-    par = ["s", "loc", "scale"]
-    yld = True
+    par = ["n", "loc", "scale"]
 
-    _val = [1, 0, 1]
-    _lim = {
-        "s": (0, None),
-        "loc": (None, None),
-        "scale": (0, None),
-    }
+    def __init__(self) -> None:
+        super().__init__([1, 0, 1], n=(0, None), scale=(0, None))
 
-    def density(self, x: ArrayLike, s: float, loc: float, scale: float):
-        return s * norm.pdf(x, loc, scale)
+    def density(self, x: ArrayLike):
+        return self.val[0] * norm.pdf(x, self.val[1:])
 
     def integral(self, x: ArrayLike, s: float, loc: float, scale: float):
-        return s * norm.cdf(x, loc, scale)
+        return self.val[0] * norm.cdf(x, self.val[1:])
 
-    def pdf(self, x: ArrayLike, loc: float, scale: float):
-        return norm.pdf(x, loc, scale)
+    def pdf(self, x: ArrayLike):
+        return norm.pdf(x, self.val[1:])
 
-    def cdf(self, x: ArrayLike, loc: float, scale: float):
-        return norm.cdf(x, loc, scale)
+    def cdf(self, x: ArrayLike):
+        return norm.cdf(x, self.val[1:])
 
-    def der(self, x: ArrayLike, loc: float, scale: float):
-        return norm.pdf(x, loc, scale) * (loc - x) / scale**2
+    def der(self, x: ArrayLike):
+        return norm.pdf(x, self.val[1:]) * (self.val[1] - x) / self.val[2] ** 2
 
 
 class Voigt(FitModel1d):
     name = "Voigt"
     par = ["s", "gamma", "loc", "scale"]
-    yld = True
 
-    _val = [1, 1, 0, 1]
-    _lim = {
-        "s": (0, None),
-        "gamma": (0, None),
-        "loc": (None, None),
-        "scale": (0, None),
-    }
-
-    def density(
-        self, x: ArrayLike, s: float, gamma: float, loc: float, scale: float
-    ) -> NDArray:
-        return s * voigt.pdf(x, gamma, loc, scale)
-
-    def integral(
-        self, x: ArrayLike, s: float, gamma: float, loc: float, scale: float
-    ) -> NDArray:
-        return s * self.cdf(x, gamma, loc, scale)
-
-    def pdf(
-        self, x: ArrayLike, gamma: float, loc: float, scale: float
-    ) -> NDArray:
-        return voigt.pdf(x, gamma, loc, scale)
-
-    def cdf(
-        self, x: ArrayLike, gamma: float, loc: float, scale: float
-    ) -> NDArray:
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-        return num_eval_cdf(x, _x, voigt.pdf(_x, gamma, loc, scale))
-
-
-class DoubleGaussian(FitModel1d):
-    name = "Gaussian + Gaussian"
-    par = ["s", "loc", "scale_a", "scale_b", "ratio"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * (
-            par[4] * norm.pdf(x, par[1], par[2])
-            + (1 - par[4]) * norm.pdf(x, par[1], par[3])
+    def __init__(self) -> None:
+        super().__init__(
+            [1, 1, 0, 1], n=(0, None), gamma=(0, None), scale=(0, None)
         )
 
-    def cdf(self, x, par):
-        return par[0] * (
-            par[4] * norm.cdf(x, par[1], par[2])
-            + (1 - par[4]) * norm.cdf(x, par[1], par[3])
-        )
+    def density(self, x: ArrayLike) -> NDArray:
+        return self.val[0] * voigt.pdf(x, self.val[1:])
 
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
+    def integral(self, x: ArrayLike) -> NDArray:
+        return self.val[0] * self.cdf(x, self.val[1:])
 
-        return {
-            "s": (0, n_max),
-            "loc": self.xr,
-            "scale_a": (0.001 * dx, dx),
-            "scale_b": (0.0001 * dx, 0.5 * dx),
-            "ratio": (0, 1),
-        }
+    def pdf(self, x: ArrayLike) -> NDArray:
+        return voigt.pdf(x, self.val[1:])
 
-    def _start_val(self, n):
-        return {
-            "s": n,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale_a": 0.05 * (self.xr[1] - self.xr[0]),
-            "scale_b": 0.5 * (self.xr[1] - self.xr[0]),
-            "ratio": 0.9,
-        }
-
-
-class VoigtBox(FitModel1d):
-    name = "Voigt + Box"
-    par = ["s", "gamma", "loc", "scale", "ratio", "width"]
-
-    @staticmethod
-    def pdf(x, par):
-        xmin = par[2] - 0.5 * par[5]
-
-        return par[0] * (
-            par[4] * uniform.pdf(x, xmin, par[5])
-            + (1 - par[4]) * voigt.pdf(x, par[1], par[2], par[3])
-        )
-
-    def cdf(self, x, par):
-        xmin = par[2] - 0.5 * par[5]
-
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-
-        return par[0] * (
-            par[4] * uniform.cdf(x, xmin, par[5])
-            + (1 - par[4])
-            * num_eval_cdf(x, _x, voigt.pdf(_x, par[1], par[2], par[3]))
-        )
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "gamma": (0.00001 * dx, 0.1 * dx),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, dx),
-            "ratio": (0, 1),
-            "width": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": n,
-            "gamma": 0.01 * dx,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0]),
-            "ratio": 0.2,
-            "width": 0.05 * (self.xr[1] - self.xr[0]),
-        }
-
-
-class VoigtGaussian(FitModel1d):
-    name = "Voigt + Gaussian"
-    par = ["s", "gamma", "loc", "scale_voigt", "scale_norm", "ratio"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * (
-            par[5] * voigt.pdf(x, *par[1:4])
-            + (1 - par[5]) * norm.pdf(x, par[2], par[4])
-        )
-
-    def cdf(self, x, par):
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-        return par[0] * (
-            par[5] * num_eval_cdf(x, _x, voigt.pdf(_x, *par[1:4]))
-            + (1 - par[5]) * norm.cdf(x, par[2], par[4])
-        )
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "gamma": (0.00001 * dx, 0.1 * dx),
-            "loc": self.xr,
-            "scale_voigt": (0.0001 * dx, 0.5 * dx),
-            "scale_norm": (0.0001 * dx, 0.5 * dx),
-            "ratio": (0, 1),
-        }
-
-    def _start_val(self, n):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": n,
-            "gamma": 0.01 * dx,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale_voigt": 0.05 * (self.xr[1] - self.xr[0]),
-            "scale_norm": 0.05 * (self.xr[1] - self.xr[0]),
-            "ratio": 0.5,
-        }
-
-
-class QGaussian(FitModel1d):
-    name = "Q-Gaussian"
-    par = ["s", "q", "loc", "scale"]
-
-    @staticmethod
-    def pdf(x, par):
-        if par[1] < 1:
-            par[1] = 1
-            wrnmsg = "q cannot be smaller than 1. Setting q=1."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        if par[1] > 3:
-            par[1] = 3
-            wrnmsg = "q cannot be larger than 3. Setting q=3."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        return par[0] * qgaussian.pdf(x, *par[1:])
-
-    def cdf(self, x, par):
-        if par[1] < 1:
-            par[1] = 1
-            wrnmsg = "q cannot be smaller than 1. Setting q=1."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        if par[1] > 3:
-            par[1] = 3
-            wrnmsg = "q cannot be larger than 3. Setting q=3."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        return par[0] * qgaussian.cdf(x, *par[1:])
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "q": (1, 3),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        return {
-            "s": n,
-            "q": 2,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0]),
-        }
-
-
-class GeneralizedGaussian(FitModel1d):
-    name = "Generalized Gaussian"
-    par = ["s", "beta", "loc", "scale"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * gennorm.pdf(x, *par[1:])
-
-    def cdf(self, x, par):
-        return par[0] * gennorm.cdf(x, *par[1:])
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "beta": (0, 50),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        return {
-            "s": n,
-            "beta": 2,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0]),
-        }
-
-
-class Studentst(FitModel1d):
-    name = "Student's t"
-    par = ["s", "df", "loc", "scale"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * t.pdf(x, *par[1:])
-
-    def cdf(self, x, par):
-        return par[0] * t.cdf(x, *par[1:])
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "df": (0, 50),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        return {
-            "s": n,
-            "df": 1,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * (self.xr[1] - self.xr[0]),
-        }
-
-
-class Cruijff(FitModel1d):
-    name = "Cruijff"
-    par = ["s", "beta_left", "beta_right", "loc", "scale_left", "scale_right"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * cruijff.density(x, *par[1:])
-
-    def cdf(self, x, par):
-        _x = np.linspace(self.xr[0], self.xr[1], 1000)
-        return par[0] * num_eval_cdf(x, _x, cruijff.density(_x, *par[1:]))
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "beta_left": (0, 1),
-            "beta_right": (0, 1),
-            "loc": self.xr,
-            "scale_left": (0.0001 * dx, 0.5 * dx),
-            "scale_right": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": n,
-            "beta_left": 0.1,
-            "beta_right": 0.1,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale_left": 0.05 * dx,
-            "scale_right": 0.05 * dx,
-        }
-
-
-class CrystalBall(FitModel1d):
-    name = "CrystalBall"
-    par = ["s", "beta", "m", "loc", "scale"]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * crystalball.pdf(x, *par[1:])
-
-    @staticmethod
-    def cdf(x, par):
-        return par[0] * crystalball.cdf(x, *par[1:])
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "beta": (0, 5),
-            "m": (1, 10),
-            "loc": self.xr,
-            "scale": (0.0001 * dx, 0.5 * dx),
-        }
-
-    def _start_val(self, n):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": n,
-            "beta": 1,
-            "m": 2,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-            "scale": 0.05 * dx,
-        }
-
-
-class CrystalBallEx(FitModel1d):
-    name = "CrystalBallEx"
-    par = [
-        "s",
-        "beta_left",
-        "m_left",
-        "scale_left",
-        "beta_right",
-        "m_right",
-        "scale_right",
-        "loc",
-    ]
-
-    @staticmethod
-    def pdf(x, par):
-        return par[0] * crystalball_ex.pdf(x, *par[1:])
-
-    @staticmethod
-    def cdf(x, par):
-        return par[0] * crystalball_ex.cdf(x, *par[1:])
-
-    def limits(self, n_max):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": (0, n_max),
-            "beta_left": (0, 5),
-            "m_left": (1, 10),
-            "scale_left": (0.0001 * dx, 0.5 * dx),
-            "beta_right": (0, 5),
-            "m_right": (1, 10),
-            "scale_right": (0.0001 * dx, 0.5 * dx),
-            "loc": self.xr,
-        }
-
-    def _start_val(self, n):
-        dx = self.xr[1] - self.xr[0]
-
-        return {
-            "s": n,
-            "beta_left": 1,
-            "m_left": 2,
-            "scale_left": 0.05 * dx,
-            "beta_right": 1,
-            "m_right": 2,
-            "scale_right": 0.05 * dx,
-            "loc": 0.5 * (self.xr[0] + self.xr[1]),
-        }
-
-
-class Bernstein(FitModel1d):
-    par = ["b_ij"]
-
-    def __init__(
-        self,
-        deg: int,
-        xr: tuple[float, float],
-    ) -> None:
-        super().__init__(xr)
-
-        self.deg = deg
-        self.par = [f"b_{i}{deg}" for i in range(deg + 1)]
-
-    def pdf(self, x, par):
-        return bernstein.density(x, par, *self.xr)
-
-    def cdf(self, x, par):
-        return bernstein.integral(x, par, *self.xr)
-
-    def limits(self):
-        return {f"b_{i}{self.deg}": (0, None) for i in range(self.deg + 1)}
-
-    def start_val(self):
-        return {f"b_{i}{self.deg}": 1 for i in range(self.deg + 1)}
+    def cdf(self, x: ArrayLike) -> NDArray:
+        _x = np.linspace(x[0], x[-1], 1000)
+        return num_eval_cdf(x, _x, voigt.pdf(_x, self.val[1:]))
 
 
 class Constant(FitModel1d):
+    name = "Constant"
     par = ["b"]
 
-    def pdf(self, x, par):
-        return par[0] * uniform.pdf(x, self.xr[0], self.xr[1] - self.xr[0])
+    def __init__(self, xr: tuple[float, float]) -> None:
+        self.lx = xr[0]
+        self.dx = xr[1] - xr[0]
+        super().__init__([1], b=(0, None))
 
-    def cdf(self, x, par):
-        return par[0] * uniform.cdf(x, self.xr[0], self.xr[1] - self.xr[0])
+    def density(self, x: ArrayLike):
+        return self.val[0] * uniform.pdf(x, self.lx, self.dx)
 
-    def der(self, x, par):
+    def integral(self, x: ArrayLike):
+        return self.val[0] * uniform.cdf(x, self.lx, self.dx)
+
+    def grad(self, x: ArrayLike):
         return np.zeros_like(x)
 
-    def limits(self):
-        return {"b": (0, None)}
+    def pdf(self, x: ArrayLike):
+        return uniform.pdf(x, self.lx, self.dx)
 
-    def start_val(self):
-        return {"b": 1}
+    def cdf(self, x: ArrayLike):
+        return uniform.cdf(x, self.lx, self.dx)
+
+    def der(self, x: ArrayLike):
+        return np.zeros_like(x)
 
 
 class Exponential(FitModel1d):
+    name = "Exponential"
     par = ["b", "loc_expon", "scale_expon"]
 
-    def pdf(self, x, par):
-        return par[0] * truncexpon.pdf(x, self.xr[0], self.xr[1], *par[1:])
+    def __init__(self, xr: tuple[float, float]) -> None:
+        self.xr = xr
+        super().__init__(
+            [1, -1, 1],
+            b=(0, None),
+            loc_expon=(-1, 0),
+            scale_expon=(None, None),
+        )
 
-    def cdf(self, x, par):
-        return par[0] * truncexpon.cdf(x, self.xr[0], self.xr[1], *par[1:])
+    def density(self, x: ArrayLike):
+        return self.val[0] * truncexpon.pdf(
+            x, self.xr[0], self.xr[1], self.val[1:]
+        )
 
-    def limits(self):
-        return {
-            "b": (0, None),
-            "loc_expon": (-1, 0),
-            "scale_expon": (-100, 100),
-        }
+    def integral(self, x: ArrayLike):
+        return self.val[0] * truncexpon.cdf(
+            x, self.xr[0], self.xr[1], self.val[1:]
+        )
 
-    def start_val(self):
-        return {"b": 1, "loc_expon": -0.5, "scale_expon": 1}
+    def pdf(self, x: ArrayLike):
+        return truncexpon.pdf(x, self.xr[0], self.xr[1], self.val[1:])
+
+    def cdf(self, x: ArrayLike):
+        return truncexpon.cdf(x, self.xr[0], self.xr[1], self.val[1:])
 
 
 @nb.njit(parallel=True, fastmath={"reassoc", "contract", "arcp"})
