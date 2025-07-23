@@ -21,6 +21,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from numpy.typing import NDArray, ArrayLike
 
+__all__ = [
+    "SumModel2d",
+    "SumModel1d",
+    "FitModel2d",
+    "Gaussian",
+    "Voigt",
+    "Constant",
+    "Exponential",
+]
+
 
 class SumModel:
     def __init__(self) -> None:
@@ -115,6 +125,8 @@ class SumModel:
             for orig_par, new_par in mi["map"].items():
                 par_dict[new_par] = vi[orig_par]
 
+        return par_dict
+
     @lim.setter
     def lim(self, v: None) -> None:
         raise NotImplementedError()
@@ -188,7 +200,7 @@ class FitModel2d:
 
     @property
     def val(self) -> NDArray:
-        v = np.zeros_like(self.par)
+        v = np.zeros_like(self.par, dtype=np.float64)
 
         v[self.xi] = self.x.val
         v[self.yi] = self.y.val
@@ -204,7 +216,7 @@ class FitModel2d:
 
     @property
     def err(self) -> NDArray:
-        v = np.zeros_like(self.par)
+        v = np.zeros_like(self.par, dtype=np.float64)
 
         v[self.xi] = self.x.err
         v[self.yi] = self.y.err
@@ -221,7 +233,6 @@ class FitModel2d:
     @property
     def lim(self) -> dict[tuple[float | None, float | None]]:
         lim = {}
-
         xi = 0
         yi = 0
 
@@ -232,6 +243,9 @@ class FitModel2d:
 
             if self.yi[i]:
                 lim[self.par[i]] = self.y.lim[self.y.par[yi]]
+                yi += 1
+
+        return lim
 
     @lim.setter
     def lim(self, v: None) -> None:
@@ -239,6 +253,7 @@ class FitModel2d:
 
     def density(self, xe_ye, *par):
         xe, ye = xe_ye
+        par = np.array(par)
 
         x_pdf = self.x.density(xe, *par[self.xi])
         y_pdf = self.y.density(ye, *par[self.yi])
@@ -247,9 +262,10 @@ class FitModel2d:
 
     def integral(self, xe_ye, *par):
         xe, ye = xe_ye
+        par = np.array(par)
 
-        x_cdf = self.x.cdf(xe, *par[self.xi])
-        y_cdf = self.y.cdf(ye, *par[self.yi])
+        x_cdf = self.x.integral(xe, *par[self.xi])
+        y_cdf = self.y.integral(ye, *par[self.yi])
 
         return x_cdf * y_cdf / par[0]
 
@@ -279,22 +295,17 @@ class FitModel1d:
 
         return y, np.sqrt(np.diag(err))
 
-    def value(self, par: str):
-        if par not in self.par:
-            errmsg = f"Unknown parameter {par}"
-            raise ValueError(errmsg)
-
+    def set_value(self, par: str, val: float) -> None:
         idx = self.par.index(par)
+        self.val[idx] = val
+        self.err = np.zeros_like(self.val, dtype=np.float64)
 
+    def value(self, par: str) -> float:
+        idx = self.par.index(par)
         return self.val[idx]
 
-    def error(self, par: str):
-        if par not in self.par:
-            errmsg = f"Unknown parameter {par}"
-            raise ValueError(errmsg)
-
+    def error(self, par: str) -> float:
         idx = self.par.index(par)
-
         return self.err[idx]
 
 

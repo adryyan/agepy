@@ -24,20 +24,12 @@ from agepy.qt import MainWindow
 from agepy.qt.util import BlitManager
 from agepy import ageplot
 from agepy.spec.fit_models import (
+    SumModel2d,
+    FitModel2d,
     Gaussian,
-    DoubleGaussian,
-    QGaussian,
     Voigt,
-    VoigtGaussian,
-    GeneralizedGaussian,
-    Studentst,
-    Cruijff,
-    CrystalBall,
-    CrystalBallEx,
-    VoigtBox,
     Constant,
     Exponential,
-    Bernstein,
 )
 
 from typing import TYPE_CHECKING
@@ -316,26 +308,12 @@ class PhexPhemViewer(MainWindow):
 class InteractiveFit(QtWidgets.QDialog):
     sig_models = {
         "Gaussian": Gaussian,
-        "Q-Gaussian": QGaussian,
-        "Generalized Gaussian": GeneralizedGaussian,
-        "Gaussian + Gaussian": DoubleGaussian,
         "Voigt": Voigt,
-        "Voigt + Box": VoigtBox,
-        "Voigt + Gaussian": VoigtGaussian,
-        "Student's t": Studentst,
-        "Cruijff": Cruijff,
-        "CrystalBall": CrystalBall,
-        "CrystalBallEx": CrystalBallEx,
     }
 
     bkg_models = {
-        "None": None,
         "Constant": Constant,
         "Exponential": Exponential,
-        "Bernstein1d": lambda xr: Bernstein(1, xr),
-        "Bernstein2d": lambda xr: Bernstein(2, xr),
-        "Bernstein3d": lambda xr: Bernstein(3, xr),
-        "Bernstein4d": lambda xr: Bernstein(4, xr),
     }
 
     def __init__(
@@ -348,7 +326,7 @@ class InteractiveFit(QtWidgets.QDialog):
         x_sig: str = "Gaussian",
         y_sig: str = "Voigt",
         x_bkg: str = "Constant",
-        y_bkg: str = "None",
+        y_bkg: str = "Constant",
     ) -> None:
         self.n, self.xe, self.ye = n, xe, ye
         self.xr = (xe[0], xe[-1])
@@ -413,12 +391,9 @@ class InteractiveFit(QtWidgets.QDialog):
                 "layout": layout,
                 "x": x_cbox,
                 "x_fit": None,
-                "x_par": [],
-                "x_idx": [],
                 "y": y_cbox,
                 "y_fit": None,
-                "y_par": [],
-                "y_idx": [],
+                "fit": None,
             }
 
         # Create background model selection widget
@@ -445,12 +420,9 @@ class InteractiveFit(QtWidgets.QDialog):
             "layout": layout,
             "x": x_cbox,
             "x_fit": None,
-            "x_par": [],
-            "x_idx": [],
             "y": y_cbox,
             "y_fit": None,
-            "y_par": [],
-            "y_idx": [],
+            "fit": None,
         }
 
         # Create the button box
@@ -496,13 +468,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
 
     def prepare_fit(self) -> None:
-        # Remember current parameters and limits
-        params_prev = self.params.copy()
-
-        # Construct the new parameters and limits
-        params = {}
-        limits = {}
-        par_idx = 0
+        self.fit = SumModel2d()
 
         for i in range(self.n_sig):
             x_name = self.sig[i]["x"].currentText()
@@ -511,159 +477,49 @@ class InteractiveFit(QtWidgets.QDialog):
             x_fit = self.sig_models[x_name](self.xr)
             y_fit = self.sig_models[y_name](self.yr)
 
-            x_par = x_fit.start_val(self.s_start)
-            y_par = y_fit.start_val(self.s_start)
+            x_loc, y_loc = self.assignments[i].get_center()
+            x_w = self.assignments[i].width
+            y_w = self.assignments[i].height
 
-            x_lim = x_fit.limits(self.s_limit)
-            y_lim = y_fit.limits(self.s_limit)
+            x_fit.set_value("loc", x_loc)
+            x_fit.lim["loc"] = (x_loc - x_w, x_loc + x_w)
+            x_fit.set_value("scale", x_w * 0.1)
+            x_fit.lim["scale"] = (x_w * 0.001, x_w)
 
+            y_fit.set_value("loc", y_loc)
+            y_fit.lim["loc"] = (y_loc - y_w, y_loc + y_w)
+            y_fit.set_value("scale", y_w * 0.1)
+            y_fit.lim["scale"] = (y_w * 0.001, y_w)
+
+            self.sig[i]["fit"] = FitModel2d(x_fit, y_fit)
             self.sig[i]["x_fit"] = x_fit
             self.sig[i]["y_fit"] = y_fit
 
-            x_loc, y_loc = self.assignments[i].get_center()
-            x_scale = self.assignments[i].width * 0.1
-            y_scale = self.assignments[i].height * 0.1
-
-            self.sig[i]["x_par"] = []
-            self.sig[i]["y_par"] = []
-
-            self.sig[i]["x_idx"] = []
-            self.sig[i]["y_idx"] = []
-
-            for par in x_par:
-                self.sig[i]["x_par"].append(f"{par}_x{i}")
-                self.sig[i]["x_idx"].append(par_idx)
-
-                if par == "s":
-                    self.sig[i]["x_par"][-1] = f"s_{i}"
-                    params[f"s_{i}"] = x_par["s"]
-                    limits[f"s_{i}"] = x_lim["s"]
-
-                    self.sig[i]["y_idx"].append(par_idx)
-
-                elif par == "loc":
-                    params[f"loc_x{i}"] = x_loc
-                    limits[f"loc_x{i}"] = (x_loc - x_scale, x_loc + x_scale)
-
-                elif par == "scale":
-                    params[f"scale_x{i}"] = x_scale
-                    limits[f"scale_x{i}"] = (0.01 * x_scale, 5 * x_scale)
-
-                else:
-                    params[f"{par}_x{i}"] = x_par[par]
-                    limits[f"{par}_x{i}"] = x_lim[par]
-
-                par_idx += 1
-
-            for par in y_par:
-                if par == "s":
-                    self.sig[i]["y_par"].append(f"s_{i}")
-                    continue
-
-                self.sig[i]["y_par"].append(f"{par}_x{i}")
-                self.sig[i]["y_idx"].append(par_idx)
-
-                if par == "loc":
-                    params[f"loc_y{i}"] = y_loc
-                    limits[f"loc_y{i}"] = (y_loc - y_scale, y_loc + y_scale)
-
-                elif par == "scale":
-                    params[f"scale_y{i}"] = y_scale
-                    limits[f"scale_y{i}"] = (0.01 * y_scale, 5 * y_scale)
-
-                else:
-                    params[f"{par}_y{i}"] = y_par[par]
-                    limits[f"{par}_y{i}"] = y_lim[par]
-
-                par_idx += 1
-
-            self.sig[i]["x_idx"] = np.asarray(self.sig[i]["x_idx"])
-            self.sig[i]["y_idx"] = np.asarray(self.sig[i]["y_idx"])
+            self.fit.add_model(self.sig[i]["fit"])
 
         x_name = self.bkg["x"].currentText()
-
-        if x_name == "None":
-            self.bkg["x_fit"] = None
-            x_par = {}
-            x_lim = {}
-
-        else:
-            x_fit = self.bkg_models[x_name](self.xr)
-            self.bkg["x_fit"] = x_fit
-            x_par = x_fit.start_val()
-            x_lim = x_fit.limits()
-
-        self.bkg["x_par"] = list(x_par.keys())
-        self.bkg["x_idx"] = np.arange(par_idx, par_idx + len(x_par.keys()))
-
-        par_idx += len(x_par.keys())
+        x_fit = self.bkg_models[x_name](self.xr)
+        self.bkg["x_fit"] = x_fit
 
         y_name = self.bkg["y"].currentText()
+        y_fit = self.bkg_models[y_name](self.yr)
+        self.bkg["y_fit"] = y_fit
 
-        if y_name == "None":
-            self.bkg["y_fit"] = None
-            y_par = {}
-            y_lim = {}
+        self.bkg["fit"] = FitModel2d(x_fit, y_fit)
 
-        else:
-            y_fit = self.bkg_models[y_name](self.yr)
-            self.bkg["y_fit"] = y_fit
-            y_par = y_fit.start_val()
-            y_lim = y_fit.limits()
-
-        self.bkg["y_par"] = list(y_par.keys())
-        self.bkg["y_idx"] = np.arange(par_idx, par_idx + len(y_par.keys()))
-
-        self.params = {**params, **x_par, **y_par}
-        limits = {**limits, **x_lim, **y_lim}
-
-        def integral(xe_ye, *args):
-            xe, ye = xe_ye
-            args = np.asarray(args)
-
-            cdf = np.zeros_like(xe)
-            for i in range(self.n_sig):
-                val_x = args[self.sig[i]["x_idx"]]
-                val_y = args[self.sig[i]["y_idx"]]
-                cdf += (
-                    self.sig[i]["x_fit"].cdf(xe, val_x)
-                    * self.sig[i]["y_fit"].cdf(ye, val_y)
-                    / val_x[0]
-                )
-
-            if self.bkg["x_fit"] is not None:
-                cdf += self.bkg["x_fit"].cdf(xe, args[self.bkg["x_idx"]])
-
-            if self.bkg["y_fit"] is not None:
-                cdf += self.bkg["y_fit"].cdf(ye, args[self.bkg["y_idx"]])
-
-            return cdf
-
-        # Keep previous parameters and limits if possible
-        for par in params_prev:
-            if par in self.params:
-                self.params[par] = self.m.values[par]
+        self.fit.add_model(self.bkg["fit"])
 
         # Update the cost function
-        c = cost.ExtendedBinnedNLL(self.n, (self.xe, self.ye), integral)
-
-        # Update the Minuit object
-        self.m = Minuit(
-            c, *list(self.params.values()), name=list(self.params.keys())
+        c = cost.ExtendedBinnedNLL(
+            self.n, (self.xe, self.ye), self.fit.integral
         )
 
+        # Update the Minuit object
+        self.m = Minuit(c, *list(self.fit.val), name=self.fit.par)
+
         # Set the limits
-        for par, lim in limits.items():
+        for par, lim in self.fit.lim.items():
             self.m.limits[par] = lim
-
-        def plot(args):
-            from matplotlib import pyplot as plt
-
-            fig = plt.gcf()
-            fig.set_figwidth(2 * fig.get_figwidth() / 1.5)
-            _, ax = plt.subplots(1, 2, num=fig.number)
-
-            plt.sca(ax[0])
 
         # Update the visualization
         fit_widget = make_widget(
@@ -680,20 +536,4 @@ class InteractiveFit(QtWidgets.QDialog):
         if not self.m.valid:
             return None
 
-        # Get the covariance matrix
-        cov = np.array(self.m.covariance)
-
-        # Get the parameter names
-        par = self.sig.par
-
-        # Get fitted parameter values and uncertainties
-        self.sig.val = np.array(self.m.values[par])
-        self.sig.err = np.array(self.m.errors[par])
-
-        # Get the covariance matrix for sig1
-        self.sig.cov = cov[: len(par), : len(par)]
-
-        # Get the chi2 / ndof
-        self.sig.chi2 = self.m.fmin.reduced_chi2
-
-        return self.sig
+        return
