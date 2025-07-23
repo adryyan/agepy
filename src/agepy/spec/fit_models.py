@@ -2,27 +2,18 @@ from __future__ import annotations
 
 try:
     from numba_stats import (
-        bernstein,
         norm,
         truncexpon,
         uniform,
         voigt,
-        cruijff,
-        crystalball,
-        crystalball_ex,
-        qgaussian,
-        t,
     )
 
 except ImportError as e:
     errmsg = "numba_stats required for fitting."
     raise ImportError(errmsg) from e
 
-import warnings
 import numpy as np
-import xarray as xr
 import numba as nb
-from scipy.stats import gennorm
 from jacobi import propagate
 
 from typing import TYPE_CHECKING
@@ -31,65 +22,42 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray, ArrayLike
 
 
-class FitParam:
-    def __init__(
-        self,
-        name: str,
-        val: float = 0,
-        lim: tuple[float | None, float | None] = (None, None),
-    ) -> None:
-        self.name = str(name)
-        self.val = float(val)
-        self.err = 0.0
-        self.lim = lim
-
-
-class YieldParam(FitParam):
-    def __init__(self) -> None:
-        super().__init__("n", val=1, lim=(0, None))
-
-
-class LocParam(FitParam):
-    def __init__(self) -> None:
-        super().__init__("loc", val=0, lim=(None, None))
-
-
-class ScaleParam(FitParam):
-    def __init__(self) -> None:
-        super().__init__("scale", val=1, lim=(0, None))
-
-
 class SumModel:
     def __init__(self) -> None:
         self.models = {}
-        self.par_map = {}
         self.par = []
 
     def update_par(self) -> None:
         self.par = []
-
-        for par_map in self.par_map.values():
-            for par in par_map.values():
+        for m in self.models.values():
+            for par in m["map"].values():
                 if par not in self.par:
                     self.par.append(par)
 
-    def add_model(self, model) -> None:
-        model_idx = len(self.models)
+    def add_model(self, model, idx: int | None = None) -> None:
+        if idx is None:
+            idx = len(self.models)
 
-        self.models[model_idx] = model
-        self.par_map[model_idx] = {}
-
+        self.models[idx] = {"model": model, "map": {}}
         for par in model.par:
-            par_new = f"{par}_{model_idx}"
-            self.par_map[model_idx][par] = par_new
+            self.models[idx]["map"][par] = f"{par}_{idx}"
 
         self.update_par()
 
-    def merge_par(self, par: str, model1: int, model2: int) -> None:
-        par_new = f"{par}_{model1}_{model2}"
-        self.par_map[model1][par] = par_new
-        self.par_map[model2][par] = par_new
+    def share_par(self, par: str, idx1: int, idx2: int) -> None:
+        if (idx1 not in self.models) or (idx2 not in self.models):
+            errmsg = "Unknown model index"
+            raise KeyError(errmsg)
 
+        map1 = self.models[idx1]["map"]
+        map2 = self.models[idx2]["map"]
+
+        if (par not in map1) or (par not in map2):
+            errmsg = f"Unknown parameter {par}"
+            raise KeyError(errmsg)
+
+        map1[par] = f"{par}_{idx1}_{idx2}"
+        map2[par] = f"{par}_{idx1}_{idx2}"
         self.update_par()
 
     @property
@@ -97,21 +65,21 @@ class SumModel:
         v = [0] * len(self.par)
         par_dict = dict(zip(self.par, v))
 
-        for mi in self.models:
-            vi = self.models[mi].val
+        for mi in self.models.values():
+            vi = mi["model"].val
 
-            for vij, par in zip(vi, self.par_map[mi].values()):
+            for vij, par in zip(vi, mi["map"].values()):
                 par_dict[par] = vij
 
-        return np.array(par_dict.values())
+        return np.array(list(par_dict.values()))
 
     @val.setter
     def val(self, v: ArrayLike) -> None:
         par_dict = dict(zip(self.par, v))
 
-        for mi in self.models:
-            self.models[mi].val = np.array(
-                [par_dict[par] for par in self.par_map[mi].values()]
+        for mi in self.models.values():
+            mi["model"].val = np.array(
+                [par_dict[par] for par in mi["map"].values()]
             )
 
     @property
@@ -119,21 +87,21 @@ class SumModel:
         v = [0] * len(self.par)
         par_dict = dict(zip(self.par, v))
 
-        for mi in self.models:
-            vi = self.models[mi].err
+        for mi in self.models.values():
+            vi = mi["model"].err
 
-            for vij, par in zip(vi, self.par_map[mi].values()):
+            for vij, par in zip(vi, mi["map"].values()):
                 par_dict[par] = vij
 
-        return np.array(par_dict.values())
+        return np.array(list(par_dict.values()))
 
     @err.setter
     def err(self, v: ArrayLike) -> None:
         par_dict = dict(zip(self.par, v))
 
-        for mi in self.models:
-            self.models[mi].err = np.array(
-                [par_dict[par] for par in self.par_map[mi].values()]
+        for mi in self.models.values():
+            mi["model"].val = np.array(
+                [par_dict[par] for par in mi["map"].values()]
             )
 
     @property
@@ -141,10 +109,10 @@ class SumModel:
         v = [(None, None)] * len(self.par)
         par_dict = dict(zip(self.par, v))
 
-        for mi in self.models:
-            vi = self.models[mi].lim
+        for mi in self.models.values():
+            vi = mi["model"].lim
 
-            for orig_par, new_par in self.par_map[mi].items():
+            for orig_par, new_par in mi["map"].items():
                 par_dict[new_par] = vi[orig_par]
 
     @lim.setter
@@ -157,9 +125,9 @@ class SumModel2d(SumModel):
         par_dict = dict(zip(self.par, par))
         z = np.zeros_like(xe_ye[0])
 
-        for m in self.models:
-            val = [par_dict[p] for p in self.par_map[m].values()]
-            z += self.models[m].density(xe_ye, *val)
+        for mi in self.models.values():
+            val = [par_dict[p] for p in mi["map"].values()]
+            z += mi["model"].density(xe_ye, *val)
 
         return z
 
@@ -167,9 +135,9 @@ class SumModel2d(SumModel):
         par_dict = dict(zip(self.par, par))
         z = np.zeros_like(xe_ye[0])
 
-        for m in self.models:
-            val = [par_dict[p] for p in self.par_map[m].values()]
-            z += self.models[m].integral(xe_ye, *val)
+        for mi in self.models.values():
+            val = [par_dict[p] for p in mi["map"].values()]
+            z += mi["model"].integral(xe_ye, *val)
 
         return z
 
@@ -179,55 +147,51 @@ class SumModel1d(SumModel):
         par_dict = dict(zip(self.par, par))
         y = np.zeros_like(x)
 
-        for m in self.models:
-            val = [par_dict[p] for p in self.par_map[m].values()]
-            y += self.models[m].density(x, *val)
+        for mi in self.models.values():
+            val = [par_dict[p] for p in mi["map"].values()]
+            y += mi["model"].density(x, *val)
 
-        return z
+        return y
 
     def integral(self, x, *par):
         par_dict = dict(zip(self.par, par))
         y = np.zeros_like(x)
 
-        for m in self.models:
-            val = [par_dict[p] for p in self.par_map[m].values()]
-            y += self.models[m].integral(x, *val)
+        for mi in self.models.values():
+            val = [par_dict[p] for p in mi["map"].values()]
+            y += mi["model"].integral(x, *val)
 
-        return z
+        return y
 
 
 class FitModel2d:
-    def __init__(self, x_model: FitModel1d, y_model: FitModel1d):
-        self.x = x_model
-        self.y = y_model
+    def __init__(self, x: FitModel1d, y: FitModel1d):
+        self.x = x
+        self.y = y
 
-        self.par = []
+        if self.x.par[0] == "n" or self.y.par[0] == "n":
+            self.par = ["n"]
 
-        self.yld = self.x.yld or self.y.yld
-        if self.yld:
-            self.par = ["s"]
+        else:
+            self.par = ["b"]
 
-        self.xi = int(self.yld)
-        self.yi = self.xi + len(self.x.par) - int(self.x.yld)
+        if len(self.x.par) > 1:
+            for par in self.x.par[1:]:
+                self.par.append("x_" + par)
 
-        for par in self.x.par[int(self.x.yld) :]:
-            self.par.append("x_" + par)
+        if len(self.y.par) > 1:
+            for par in self.y.par[1:]:
+                self.par.append("y_" + par)
 
-        for par in self.y.par[int(self.y.yld) :]:
-            self.par.append("y_" + par)
+        self.xi = ~np.char.startswith(self.par, "y")
+        self.yi = ~np.char.startswith(self.par, "x")
 
     @property
     def val(self) -> NDArray:
         v = np.zeros_like(self.par)
 
-        v[self.xi : self.yi] = self.x.val[int(self.x.yld) :]
-        v[self.yi :] = self.y.val[int(self.y.yld) :]
-
-        if self.x.yld:
-            v[0] = self.x.val[0]
-
-        if self.y.yld:
-            v[0] = self.y.val[0]
+        v[self.xi] = self.x.val
+        v[self.yi] = self.y.val
 
         return v
 
@@ -235,27 +199,15 @@ class FitModel2d:
     def val(self, v: ArrayLike) -> None:
         v = np.array(v)
 
-        self.x.val[int(self.x.yld) :] = v[self.xi : self.yi]
-        self.y.val[int(self.y.yld) :] = v[self.yi :]
-
-        if self.x.yld:
-            self.x.val[0] = v[0]
-
-        if self.y.yld:
-            self.y.val[0] = v[0]
+        self.x.val = v[self.xi]
+        self.y.val = v[self.yi]
 
     @property
     def err(self) -> NDArray:
         v = np.zeros_like(self.par)
 
-        v[self.xi : self.yi] = self.x.err[int(self.x.yld) :]
-        v[self.yi :] = self.y.err[int(self.y.yld) :]
-
-        if self.x.yld:
-            v[0] = self.x.err[0]
-
-        if self.y.yld:
-            v[0] = self.y.err[0]
+        v[self.xi] = self.x.err
+        v[self.yi] = self.y.err
 
         return v
 
@@ -263,32 +215,23 @@ class FitModel2d:
     def err(self, v: ArrayLike) -> None:
         v = np.array(v)
 
-        self.x.err[int(self.x.yld) :] = v[self.xi : self.yi]
-        self.y.err[int(self.y.yld) :] = v[self.yi :]
-
-        if self.x.yld:
-            self.x.err[0] = v[0]
-
-        if self.y.yld:
-            self.y.err[0] = v[0]
+        self.x.err = v[self.xi]
+        self.y.err = v[self.yi]
 
     @property
     def lim(self) -> dict[tuple[float | None, float | None]]:
         lim = {}
 
-        if self.x.yld:
-            lim["s"] = self.x.lim["s"]
+        xi = 0
+        yi = 0
 
-        if self.y.yld:
-            lim["s"] = self.y.lim["s"]
+        for i in range(len(self.par)):
+            if self.xi[i]:
+                lim[self.par[i]] = self.x.lim[self.x.par[xi]]
+                xi += 1
 
-        for i in range(self.xi, self.yi):
-            par = self.x.par[i - self.xi + int(self.x.yld)]
-            lim[self.par[i]] = self.x.lim[par]
-
-        for i in range(self.yi, len(self.par)):
-            par = self.y.par[i - self.yi + int(self.y.yld)]
-            lim[self.par[i]] = self.y.lim[par]
+            if self.yi[i]:
+                lim[self.par[i]] = self.y.lim[self.y.par[yi]]
 
     @lim.setter
     def lim(self, v: None) -> None:
@@ -297,47 +240,29 @@ class FitModel2d:
     def density(self, xe_ye, *par):
         xe, ye = xe_ye
 
-        if self.yld:
-            yld = par[0]
+        x_pdf = self.x.density(xe, *par[self.xi])
+        y_pdf = self.y.density(ye, *par[self.yi])
 
-        else:
-            yld = 1
-
-        return (
-            yld
-            * self.x.pdf(xe, *par[self.xi : self.yi])
-            * self.y.pdf(ye, *par[self.yi :])
-        )
+        return x_pdf * y_pdf / par[0]
 
     def integral(self, xe_ye, *par):
         xe, ye = xe_ye
 
-        if self.yld:
-            yld = par[0]
+        x_cdf = self.x.cdf(xe, *par[self.xi])
+        y_cdf = self.y.cdf(ye, *par[self.yi])
 
-        else:
-            yld = 1
-
-        return (
-            yld
-            * self.x.cdf(xe, *par[self.xi : self.yi])
-            * self.y.cdf(ye, *par[self.yi :])
-        )
+        return x_cdf * y_cdf / par[0]
 
 
 class FitModel1d:
-    name: str
-    par: list[str]
-    yld: bool
-
-    _val: list[float]
-    _lim: dict[tuple[float | None, float | None]]
+    name: str = ""
+    par: list[str] = []
 
     def __init__(
         self, val: list[float], **lim: tuple[float | None, float | None]
     ) -> None:
-        self.val = xr.DataArray(val, coords=[("par", self.par)])
-        self.err = xr.DataArray(np.zeros_like(val), coords=[("par", self.par)])
+        self.val = np.array(val, dtype=np.float64)
+        self.err = np.zeros_like(val, dtype=np.float64)
 
         self.lim = {}
         for par in self.par:
@@ -363,10 +288,6 @@ class FitModel1d:
 
         return self.val[idx]
 
-    def set_value(self, par: str, val: float) -> None:
-        idx = self.par.index(par)
-        self.val[idx] = val
-
     def error(self, par: str):
         if par not in self.par:
             errmsg = f"Unknown parameter {par}"
@@ -381,46 +302,64 @@ class Gaussian(FitModel1d):
     name = "Gaussian"
     par = ["n", "loc", "scale"]
 
-    def __init__(self) -> None:
-        super().__init__([1, 0, 1], n=(0, None), scale=(0, None))
+    def __init__(self, xr: tuple[float, float]) -> None:
+        super().__init__(
+            [1, 0, 1],
+            n=(0, None),
+            loc=(xr[0], xr[1]),
+            scale=(0, 0.2 * (xr[1] - xr[0])),
+        )
 
-    def density(self, x: ArrayLike):
-        return self.val[0] * norm.pdf(x, self.val[1:])
+    def density(self, x: ArrayLike, n: float, loc: float, scale: float):
+        return n * norm.pdf(x, loc, scale)
 
-    def integral(self, x: ArrayLike, s: float, loc: float, scale: float):
-        return self.val[0] * norm.cdf(x, self.val[1:])
+    def integral(self, x: ArrayLike, n: float, loc: float, scale: float):
+        return n * norm.cdf(x, loc, scale)
 
-    def pdf(self, x: ArrayLike):
-        return norm.pdf(x, self.val[1:])
+    def pdf(self, x: ArrayLike, loc: float, scale: float):
+        return norm.pdf(x, loc, scale)
 
-    def cdf(self, x: ArrayLike):
-        return norm.cdf(x, self.val[1:])
+    def cdf(self, x: ArrayLike, loc: float, scale: float):
+        return norm.cdf(x, loc, scale)
 
-    def der(self, x: ArrayLike):
-        return norm.pdf(x, self.val[1:]) * (self.val[1] - x) / self.val[2] ** 2
+    def der(self, x: ArrayLike, loc: float, scale: float):
+        return norm.pdf(x, loc, scale) * (loc - x) / scale**2
 
 
 class Voigt(FitModel1d):
     name = "Voigt"
-    par = ["s", "gamma", "loc", "scale"]
+    par = ["n", "gamma", "loc", "scale"]
 
-    def __init__(self) -> None:
+    def __init__(self, xr: tuple[float, float]) -> None:
+        self.xr = xr
         super().__init__(
-            [1, 1, 0, 1], n=(0, None), gamma=(0, None), scale=(0, None)
+            [1, 1, 0, 1],
+            n=(0, None),
+            gamma=(0, None),
+            loc=(xr[0], xr[1]),
+            scale=(0, 0.2 * (xr[1] - xr[0])),
         )
 
-    def density(self, x: ArrayLike) -> NDArray:
-        return self.val[0] * voigt.pdf(x, self.val[1:])
+    def density(
+        self, x: ArrayLike, n: float, gamma: float, loc: float, scale: float
+    ) -> NDArray:
+        return n * voigt.pdf(x, gamma, loc, scale)
 
-    def integral(self, x: ArrayLike) -> NDArray:
-        return self.val[0] * self.cdf(x, self.val[1:])
+    def integral(
+        self, x: ArrayLike, n: float, gamma: float, loc: float, scale: float
+    ) -> NDArray:
+        return n * self.cdf(x, gamma, loc, scale)
 
-    def pdf(self, x: ArrayLike) -> NDArray:
-        return voigt.pdf(x, self.val[1:])
+    def pdf(
+        self, x: ArrayLike, gamma: float, loc: float, scale: float
+    ) -> NDArray:
+        return voigt.pdf(x, gamma, loc, scale)
 
-    def cdf(self, x: ArrayLike) -> NDArray:
-        _x = np.linspace(x[0], x[-1], 1000)
-        return num_eval_cdf(x, _x, voigt.pdf(_x, self.val[1:]))
+    def cdf(
+        self, x: ArrayLike, gamma: float, loc: float, scale: float
+    ) -> NDArray:
+        _x = np.linspace(self.xr[0], self.xr[1], 1000)
+        return num_eval_cdf(x, _x, voigt.pdf(_x, gamma, loc, scale))
 
 
 class Constant(FitModel1d):
@@ -432,11 +371,11 @@ class Constant(FitModel1d):
         self.dx = xr[1] - xr[0]
         super().__init__([1], b=(0, None))
 
-    def density(self, x: ArrayLike):
-        return self.val[0] * uniform.pdf(x, self.lx, self.dx)
+    def density(self, x: ArrayLike, b: float):
+        return b * uniform.pdf(x, self.lx, self.dx)
 
-    def integral(self, x: ArrayLike):
-        return self.val[0] * uniform.cdf(x, self.lx, self.dx)
+    def integral(self, x: ArrayLike, b: float):
+        return b * uniform.cdf(x, self.lx, self.dx)
 
     def grad(self, x: ArrayLike):
         return np.zeros_like(x)
@@ -453,32 +392,36 @@ class Constant(FitModel1d):
 
 class Exponential(FitModel1d):
     name = "Exponential"
-    par = ["b", "loc_expon", "scale_expon"]
+    par = ["b", "loc_exp", "scale_exp"]
 
     def __init__(self, xr: tuple[float, float]) -> None:
         self.xr = xr
         super().__init__(
-            [1, -1, 1],
+            [1, 0, 1],
             b=(0, None),
-            loc_expon=(-1, 0),
-            scale_expon=(None, None),
+            loc_exp=(-1, 0),
+            scale_exp=(None, None),
         )
 
-    def density(self, x: ArrayLike):
-        return self.val[0] * truncexpon.pdf(
-            x, self.xr[0], self.xr[1], self.val[1:]
+    def density(
+        self, x: ArrayLike, b: float, loc_exp: float, scale_exp: float
+    ):
+        return b * truncexpon.pdf(
+            x, self.xr[0], self.xr[1], loc_exp, scale_exp
         )
 
-    def integral(self, x: ArrayLike):
-        return self.val[0] * truncexpon.cdf(
-            x, self.xr[0], self.xr[1], self.val[1:]
+    def integral(
+        self, x: ArrayLike, b: float, loc_exp: float, scale_exp: float
+    ):
+        return b * truncexpon.cdf(
+            x, self.xr[0], self.xr[1], loc_exp, scale_exp
         )
 
-    def pdf(self, x: ArrayLike):
-        return truncexpon.pdf(x, self.xr[0], self.xr[1], self.val[1:])
+    def pdf(self, x: ArrayLike, loc_exp: float, scale_exp: float):
+        return truncexpon.pdf(x, self.xr[0], self.xr[1], loc_exp, scale_exp)
 
-    def cdf(self, x: ArrayLike):
-        return truncexpon.cdf(x, self.xr[0], self.xr[1], self.val[1:])
+    def cdf(self, x: ArrayLike, loc_exp: float, scale_exp: float):
+        return truncexpon.cdf(x, self.xr[0], self.xr[1], loc_exp, scale_exp)
 
 
 @nb.njit(parallel=True, fastmath={"reassoc", "contract", "arcp"})
