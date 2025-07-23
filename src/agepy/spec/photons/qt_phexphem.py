@@ -26,6 +26,7 @@ from agepy import ageplot
 from agepy.spec.fit_models import (
     SumModel2d,
     FitModel2d,
+    FitModel1d,
     Gaussian,
     Voigt,
     Constant,
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
     from numpy.typing import NDArray
     from .energy_scan import EnergyScan
-    from ._interactive_fit import FitModel
 
 
 class ReferenceMarker:
@@ -333,14 +333,7 @@ class InteractiveFit(QtWidgets.QDialog):
         self.yr = (ye[0], ye[-1])
         self.assignments = assignments
         self.n_sig = len(assignments)
-
-        # Define starting values and limits
-        n_sum = np.sum(n[:, :, 0])
-        self.s_start = n_sum * 0.8
-        self.s_limit = n_sum * 1.1
-
-        # Initialize the parameters
-        self.params = {}
+        self.fit = None
 
         # Initialize the parent class
         super().__init__(parent)
@@ -468,11 +461,18 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
 
     def prepare_fit(self) -> None:
-        self.fit = SumModel2d()
+        if self.fit is None:
+            self.fit = SumModel2d()
 
         for i in range(self.n_sig):
             x_name = self.sig[i]["x"].currentText()
             y_name = self.sig[i]["y"].currentText()
+
+            if self.sig[i]["fit"] is not None:
+                x_prev = self.sig[i]["x_fit"].name
+                y_prev = self.sig[i]["y_fit"].name
+                if x_name == x_prev and y_name == y_prev:
+                    continue
 
             x_fit = self.sig_models[x_name](self.xr)
             y_fit = self.sig_models[y_name](self.yr)
@@ -495,19 +495,25 @@ class InteractiveFit(QtWidgets.QDialog):
             self.sig[i]["x_fit"] = x_fit
             self.sig[i]["y_fit"] = y_fit
 
-            self.fit.add_model(self.sig[i]["fit"])
+            self.fit.add_model(self.sig[i]["fit"], idx=i)
 
         x_name = self.bkg["x"].currentText()
-        x_fit = self.bkg_models[x_name](self.xr)
-        self.bkg["x_fit"] = x_fit
-
         y_name = self.bkg["y"].currentText()
-        y_fit = self.bkg_models[y_name](self.yr)
-        self.bkg["y_fit"] = y_fit
 
-        self.bkg["fit"] = FitModel2d(x_fit, y_fit)
+        if self.bkg["fit"] is not None:
+            x_prev = self.bkg["x_fit"].name
+            y_prev = self.bkg["y_fit"].name
 
-        self.fit.add_model(self.bkg["fit"])
+            if x_name != x_prev or y_name != y_prev:
+                x_fit = self.bkg_models[x_name](self.xr)
+                self.bkg["x_fit"] = x_fit
+
+                y_fit = self.bkg_models[y_name](self.yr)
+                self.bkg["y_fit"] = y_fit
+
+                self.bkg["fit"] = FitModel2d(x_fit, y_fit)
+
+                self.fit.add_model(self.bkg["fit"], idx=i + 1)
 
         # Update the cost function
         c = cost.ExtendedBinnedNLL(
@@ -532,7 +538,7 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def fit_result(self) -> FitModel | None:
+    def fit_result(self) -> FitModel1d | None:
         if not self.m.valid:
             return None
 
