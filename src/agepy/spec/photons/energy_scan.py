@@ -6,7 +6,6 @@ import warnings
 import pickle
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from .scan import Scan
 
@@ -14,10 +13,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray, ArrayLike
-    from matplotlib.axes import Axes
-    from matplotlib.figure import Figure
     from .anodes import PositionAnode
     from .spectrum import Spectrum
+    from agepy.spec.fit_models import FitModel1d
 
 
 class EnergyScan(Scan):
@@ -117,9 +115,11 @@ class EnergyScan(Scan):
             "Jp",
             "phex_fit",
             "exc_energy",
+            "Elpp",
             "vpp",
             "Jpp",
             "phem_fit",
+            "emi_energy",
         ]
 
         self._bound = pd.DataFrame(columns=col)
@@ -152,6 +152,61 @@ class EnergyScan(Scan):
             else:
                 errmsg = "energy_uncertainty must have same length as steps."
                 raise ValueError(errmsg)
+
+    def get_assignment(self, **qnumbers):
+        df = self._bound
+        for qn, val in qnumbers.items():  # noqa F841
+            if df.empty:
+                return None, None
+
+            df = df.query(f"{qn} == @val")
+
+        if df.empty:
+            return None, None
+
+        df = df.iloc[0]
+
+        return df["phex_fit"], df["phem_fit"]
+
+    def set_assignment(
+        self,
+        phex_fit: FitModel1d | None,
+        phem_fit: FitModel1d | None,
+        **qnumbers: int | str,
+    ) -> None:
+        # Find the index where to save the assignment
+        df = self._bound
+        for qn, val in qnumbers.items():  # noqa
+            if df.empty:
+                break
+
+            df = df.query(f"{qn} == @val")
+
+        if df.empty:
+            if phex_fit is None or phem_fit is None:
+                return
+
+            idx = self._bound.index.max()
+            if np.isnan(idx):
+                idx = 0
+
+            else:
+                idx += 1
+
+        else:
+            idx = df.index[0]
+
+            if phex_fit is None or phem_fit is None:
+                self._bound.drop(index=idx)
+                return
+
+        row = qnumbers.copy()
+        row["phex_fit"] = phex_fit
+        row["exc_energy"] = phex_fit.value("loc")
+        row["phem_fit"] = phem_fit
+        row["emi_energy"] = phem_fit.value("loc")
+
+        self._bound.loc[idx] = row
 
     def remove_steps(
         self,
@@ -288,6 +343,14 @@ class EnergyScan(Scan):
 
         # Run the application
         return app.exec()
+
+    def save_phex(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self._bound, f)
+
+    def load_phex(self, path: str) -> None:
+        with open(path, "rb") as f:
+            self._bound = pickle.load(f)
 
     def phexphem(
         self,

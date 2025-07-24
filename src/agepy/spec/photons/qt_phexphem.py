@@ -49,12 +49,16 @@ class ReferenceMarker:
         pp: dict,
         width: float = 0.006,
         height: float = 0.015,
+        x_fit: FitModel1d | None = None,
+        y_fit: FitModel1d | None = None,
     ) -> None:
         self.parent = parent
         self.phexphem = pp
         self.width = width
         self.height = height
         self.pressed = False
+        self.x_fit = None
+        self.y_fit = None
 
         ini = f"X (v = 0, J = {pp['J']})"
         exc = f"{pp['Elp']} (v' = {pp['vp']}, J' = {pp['Jp']})"
@@ -79,8 +83,28 @@ class ReferenceMarker:
         self.cid_r = cv.mpl_connect("button_release_event", self.on_release)
         self.cid_m = cv.mpl_connect("motion_notify_event", self.on_motion)
 
+        self.assign_fit(x_fit, y_fit)
+
     def get_center(self) -> tuple[float, float]:
         return self.marker.get_center()
+
+    def assign_fit(self, x_fit, y_fit):
+        if x_fit is not None and y_fit is not None:
+            self.x_fit = x_fit
+            self.y_fit = y_fit
+            self.assigned = True
+            self.marker.set(color="green")
+            self.marker.set_center((x_fit.value("loc"), y_fit.value("loc")))
+            self.parent.scan.set_assignment(x_fit, y_fit, **self.phexphem)
+
+        else:
+            self.x_fit = None
+            self.y_fit = None
+            self.assigned = False
+            self.marker.set(color="red")
+            self.parent.scan.set_assignment(None, None, **self.phexphem)
+
+        self.parent.update()
 
     def remove(self) -> None:
         # Disconnect event callbacks
@@ -100,6 +124,8 @@ class ReferenceMarker:
 
     def on_motion(self, event) -> None:
         if self.pressed and event.inaxes == self.parent.ax:
+            if self.assigned:
+                self.assign_fit(None, None)
             self.marker.center = (event.xdata, event.ydata)
             self.parent.update()
 
@@ -246,8 +272,20 @@ class PhexPhemViewer(MainWindow):
                 x = row.exc_energy
                 y = row.emi_energy * self.phem_conv[1] + self.phem_conv[0]
 
+                qn = {
+                    "J": row.J,
+                    "Elp": row.Elp,
+                    "vp": row.vp,
+                    "Jp": row.Jp,
+                    "Elpp": row.Elpp,
+                    "vpp": row.vpp,
+                    "Jpp": row.Jpp,
+                }
+
+                x_fit, y_fit = self.scan.get_assignment(**qn)
+
                 self.ref_markers.append(
-                    ReferenceMarker(self, (x, y), row._asdict())
+                    ReferenceMarker(self, (x, y), qn, x_fit=x_fit, y_fit=y_fit)
                 )
 
             self.bm = BlitManager(
@@ -300,9 +338,7 @@ class PhexPhemViewer(MainWindow):
             return
 
         debug_fit = InteractiveFit(self, n, xe, ye, assignments)
-
-        if debug_fit.exec():
-            pass
+        debug_fit.exec()
 
 
 class InteractiveFit(QtWidgets.QDialog):
@@ -359,7 +395,9 @@ class InteractiveFit(QtWidgets.QDialog):
         # Create signal model selection widget
         self.sig = {}
         for i, mk in enumerate(assignments):
-            group = QtWidgets.QGroupBox(f"{i}: " + mk.label)
+            x_loc, y_loc = mk.get_center()
+            loc_str = f" @ x = {x_loc:.3f}, y = {y_loc:.3f}"
+            group = QtWidgets.QGroupBox(f"{i}: " + mk.label + loc_str)
             group.setSizePolicy(size_policy)
             layout = QtWidgets.QHBoxLayout(group)
 
@@ -475,45 +513,42 @@ class InteractiveFit(QtWidgets.QDialog):
                     continue
 
             x_fit = self.sig_models[x_name](self.xr)
+            self.sig[i]["x_fit"] = x_fit
             y_fit = self.sig_models[y_name](self.yr)
+            self.sig[i]["y_fit"] = y_fit
 
             x_loc, y_loc = self.assignments[i].get_center()
             x_w = self.assignments[i].width
             y_w = self.assignments[i].height
-
             x_fit.set_value("loc", x_loc)
             x_fit.lim["loc"] = (x_loc - x_w, x_loc + x_w)
             x_fit.set_value("scale", x_w * 0.1)
             x_fit.lim["scale"] = (x_w * 0.001, x_w)
-
             y_fit.set_value("loc", y_loc)
             y_fit.lim["loc"] = (y_loc - y_w, y_loc + y_w)
             y_fit.set_value("scale", y_w * 0.1)
             y_fit.lim["scale"] = (y_w * 0.001, y_w)
 
             self.sig[i]["fit"] = FitModel2d(x_fit, y_fit)
-            self.sig[i]["x_fit"] = x_fit
-            self.sig[i]["y_fit"] = y_fit
-
             self.fit.add_model(self.sig[i]["fit"], idx=i)
 
         x_name = self.bkg["x"].currentText()
         y_name = self.bkg["y"].currentText()
 
+        bkg_changed = True
         if self.bkg["fit"] is not None:
             x_prev = self.bkg["x_fit"].name
             y_prev = self.bkg["y_fit"].name
+            bkg_changed = (x_name != x_prev) or (y_name != y_prev)
 
-            if x_name != x_prev or y_name != y_prev:
-                x_fit = self.bkg_models[x_name](self.xr)
-                self.bkg["x_fit"] = x_fit
+        if self.bkg["fit"] is None or bkg_changed:
+            x_fit = self.bkg_models[x_name](self.xr)
+            self.bkg["x_fit"] = x_fit
+            y_fit = self.bkg_models[y_name](self.yr)
+            self.bkg["y_fit"] = y_fit
 
-                y_fit = self.bkg_models[y_name](self.yr)
-                self.bkg["y_fit"] = y_fit
-
-                self.bkg["fit"] = FitModel2d(x_fit, y_fit)
-
-                self.fit.add_model(self.bkg["fit"], idx=i + 1)
+            self.bkg["fit"] = FitModel2d(x_fit, y_fit)
+            self.fit.add_model(self.bkg["fit"], idx=i + 1)
 
         # Update the cost function
         c = cost.ExtendedBinnedNLL(
@@ -538,8 +573,13 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def fit_result(self) -> FitModel1d | None:
+    def accept(self) -> None:
         if not self.m.valid:
-            return None
+            super().reject()
 
-        return
+        for i in range(self.n_sig):
+            self.assignments[i].assign_fit(
+                self.sig[i]["x_fit"], self.sig[i]["y_fit"]
+            )
+
+        super().accept()
