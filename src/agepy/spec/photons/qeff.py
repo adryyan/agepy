@@ -103,8 +103,8 @@ class QEffScan(Scan):
             if fit is None:
                 continue
 
-            y.append(fit.value("s"))
-            yerr.append(fit.error("s"))
+            y.append(fit.value("n"))
+            yerr.append(fit.error("n"))
             x.append(fit.value("loc"))
 
         # Return None if fits were performed yet
@@ -164,7 +164,7 @@ class QEffScan(Scan):
         return eff, err
 
     def interactive(
-        self, bins: int | ArrayLike = 512, sig="Voigt", bkg="None"
+        self, bins: int | ArrayLike = 512, sig="Voigt", bkg="Constant"
     ) -> int:
         """Interactively evaluate the quantum efficiencies by fitting
         peaks in the spectra.
@@ -181,11 +181,11 @@ class QEffScan(Scan):
             changed in the interactive fit window.
 
         """
-        from agepy.interactive import get_qapp
-        from ._interactive_qeff import EvalQEff
+        from agepy.qt import get_qtapp
+        from .qt_qeff import EvalQEff
 
         # Get the Qt application
-        app = get_qapp()
+        app = get_qtapp()
 
         # Intialize the viewer
         mw = EvalQEff(self, bins, sig, bkg)

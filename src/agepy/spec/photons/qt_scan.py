@@ -8,12 +8,12 @@ except ImportError:
         from PyQt6 import QtGui
 
     except ImportError as e:
-        errmsg = "No compatible Qt bindings found. Install PySide6 or PyQt6."
+        errmsg = "PySide6 required."
         raise ImportError(errmsg) from e
 
 from importlib.resources import path as ilrpath
 
-from agepy.interactive import MainWindow
+from agepy.qt import MainWindow
 from agepy import ageplot
 
 # Import modules for type hinting
@@ -30,7 +30,7 @@ class SpectrumViewer(MainWindow):
         super().__init__(title="Spectrum Viewer")
         self.add_plot()
         self.add_toolbar()
-        self.add_forward_backward_action(self.plot_previous, self.plot_next)
+        self.add_action_prev_next(self.plot_previous, self.plot_next)
 
         # Add actions for the calculation options
         self.calc_options = {}
@@ -38,7 +38,7 @@ class SpectrumViewer(MainWindow):
         self.add_action_calc_option("bkg")
         self.add_action_calc_option("calib")
 
-        with ilrpath("agepy.interactive.icons", "errorbar.svg") as ipath:
+        with ilrpath("agepy.qt.icons", "errorbar.svg") as ipath:
             icon = QtGui.QIcon(str(ipath))
 
         self.add_action_calc_option("montecarlo", icon=icon)
@@ -89,7 +89,7 @@ class SpectrumViewer(MainWindow):
         )
 
         # Plot the spectrum
-        with ageplot.context(["age", "interactive"]):
+        with ageplot.context(["age", "qt"]):
             # Clear the axes
             self.ax.clear()
 

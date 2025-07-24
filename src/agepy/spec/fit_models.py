@@ -110,7 +110,7 @@ class SumModel:
         par_dict = dict(zip(self.par, v))
 
         for mi in self.models.values():
-            mi["model"].val = np.array(
+            mi["model"].err = np.array(
                 [par_dict[par] for par in mi["map"].values()]
             )
 
@@ -279,6 +279,7 @@ class FitModel1d:
     ) -> None:
         self.val = np.array(val, dtype=np.float64)
         self.err = np.zeros_like(val, dtype=np.float64)
+        self.chi2 = None
 
         self.lim = {}
         for par in self.par:

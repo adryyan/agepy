@@ -20,24 +20,16 @@ except ImportError as e:
 import numpy as np
 import matplotlib.pyplot as plt
 
-from ._interactive_scan import SpectrumViewer
-from ._interactive_fit import (
+from .qt_scan import SpectrumViewer
+from agepy.spec.fit_models import (
+    SumModel1d,
+    FitModel1d,
     Gaussian,
-    DoubleGaussian,
-    QGaussian,
     Voigt,
-    VoigtGaussian,
-    GeneralizedGaussian,
-    Studentst,
-    Cruijff,
-    CrystalBall,
-    CrystalBallEx,
-    VoigtBox,
     Constant,
     Exponential,
-    Bernstein,
 )
-from agepy.interactive import _block_signals
+from agepy.qt.util import block_signals
 from agepy import ageplot
 
 from typing import TYPE_CHECKING
@@ -46,7 +38,6 @@ if TYPE_CHECKING:
     from matplotlib.backend_bases import MouseEvent
     from numpy.typing import NDArray, ArrayLike
     from .qeff import QEffScan
-    from ._interactive_fit import FitModel
 
 
 class EvalQEff(SpectrumViewer):
@@ -61,9 +52,11 @@ class EvalQEff(SpectrumViewer):
         super().__init__(scan, bins)
 
         # Add the fit action
-        self.add_rect_selector(self.ax, self.on_select, hint="Select Peak")
+        self.fit_action, self.selector = self.add_rect_selector(
+            self.ax, self.on_select, text="Select Peak", use_icon=True
+        )
 
-        with _block_signals(*self.calc_options.values()):
+        with block_signals(*self.calc_options.values()):
             # Disable the calib action
             self.calc_options["calib"].setChecked(False)
             self.calc_options["calib"].setEnabled(False)
@@ -101,7 +94,7 @@ class EvalQEff(SpectrumViewer):
             y *= dx
             yerr *= dx
 
-            with ageplot.context(["age", "interactive"]):
+            with ageplot.context(["age", "qt"]):
                 # Plot the fit results
                 self.ax.plot(x, y, color=ageplot.colors[1])
                 self.ax.fill_between(
@@ -147,27 +140,13 @@ class EvalQEff(SpectrumViewer):
 
 class InteractiveFit(QtWidgets.QDialog):
     sig_models = {
-        "Gaussian": lambda xr: Gaussian(xr),
-        "Q-Gaussian": lambda xr: QGaussian(xr),
-        "Generalized Gaussian": lambda xr: GeneralizedGaussian(xr),
-        "Gaussian + Gaussian": lambda xr: DoubleGaussian(xr),
-        "Voigt": lambda xr: Voigt(xr),
-        "Voigt + Box": lambda xr: VoigtBox(xr),
-        "Voigt + Gaussian": lambda xr: VoigtGaussian(xr),
-        "Student's t": lambda xr: Studentst(xr),
-        "Cruijff": lambda xr: Cruijff(xr),
-        "CrystalBall": lambda xr: CrystalBall(xr),
-        "CrystalBallEx": lambda xr: CrystalBallEx(xr),
+        "Gaussian": Gaussian,
+        "Voigt": Voigt,
     }
 
     bkg_models = {
-        "None": None,
-        "Constant": lambda xr: Constant(xr),
-        "Exponential": lambda xr: Exponential(xr),
-        "Bernstein1d": lambda xr: Bernstein(1, xr),
-        "Bernstein2d": lambda xr: Bernstein(2, xr),
-        "Bernstein3d": lambda xr: Bernstein(3, xr),
-        "Bernstein4d": lambda xr: Bernstein(4, xr),
+        "Constant": Constant,
+        "Exponential": Exponential,
     }
 
     def __init__(
@@ -176,7 +155,7 @@ class InteractiveFit(QtWidgets.QDialog):
         n: NDArray,
         xe: NDArray,
         sig: str = "Voigt",
-        bkg: str = "None",
+        bkg: str = "Constant",
     ) -> None:
         # Initialize fit data
         self.n = n
@@ -185,16 +164,9 @@ class InteractiveFit(QtWidgets.QDialog):
         # Set the x range
         self.xr = (xe[0], xe[-1])
 
-        # Define starting values and limits
-        nsum = np.sum(n[:, 0])
-        self.s_start = nsum * 0.9
-        self.s_limit = nsum * 1.1
-
         self.sig = None
         self.bkg = None
-
-        # Initialize the parameters
-        self.params = {}
+        self.fit = None
 
         # Initialize the parent class
         super().__init__(parent)
@@ -285,57 +257,29 @@ class InteractiveFit(QtWidgets.QDialog):
         self.layout.addWidget(self.fit_widget, 0, 0, 1, 3)
 
     def prepare_fit(self) -> None:
+        if self.fit is None:
+            self.fit = SumModel1d()
+
         # Get the selected signal model
         sig = self.sig_comp.currentText()
-        self.sig = self.sig_models[sig](self.xr)
+        if self.sig is None or self.sig.name != sig:
+            self.sig = self.sig_models[sig](self.xr)
+            self.fit.add_model(self.sig, idx=0)
 
         # Get the selected background model
         bkg = self.bkg_comp.currentText()
-
-        # Remember current parameters and limits
-        params_prev = self.params.copy()
-
-        # Get the first signal model, starting values and limits
-        self.params = self.sig.start_val(self.s_start)
-        limits = self.sig.limits(self.s_limit)
-
-        # Initialize the signal and background models
-        if bkg == "None":
-
-            def integral(x, *args):
-                return self.sig.cdf(x, args)
-
-        else:
-            # Get the background model and parameters
+        if self.bkg is None or self.bkg.name != bkg:
             self.bkg = self.bkg_models[bkg](self.xr)
-
-            par = self.bkg.start_val()
-            lim = self.bkg.limits()
-
-            i = len(self.params)
-
-            # Combine the parameters and limits
-            self.params = {**self.params, **par}
-            limits = {**limits, **lim}
-
-            def integral(x, *args):
-                return self.sig.cdf(x, args[:i]) + self.bkg.cdf(x, args[i:])
-
-        # Keep previous parameters and limits if possible
-        for par in params_prev:
-            if par in self.params:
-                self.params[par] = self.m.values[par]
+            self.fit.add_model(self.bkg, idx=1)
 
         # Update the cost function
-        c = cost.ExtendedBinnedNLL(self.n, self.xe, integral)
+        c = cost.ExtendedBinnedNLL(self.n, self.xe, self.fit.integral)
 
         # Update the Minuit object
-        self.m = Minuit(
-            c, *list(self.params.values()), name=list(self.params.keys())
-        )
+        self.m = Minuit(c, *list(self.fit.val), name=self.fit.par)
 
         # Set the limits
-        for par, lim in limits.items():
+        for par, lim in self.fit.lim.items():
             self.m.limits[par] = lim
 
         # Update the visualization
@@ -349,22 +293,13 @@ class InteractiveFit(QtWidgets.QDialog):
         # Update the layout
         self.update_fit_widget(fit_widget)
 
-    def fit_result(self) -> FitModel | None:
+    def fit_result(self) -> FitModel1d | None:
         if not self.m.valid:
             return None
 
-        # Get the covariance matrix
-        cov = np.array(self.m.covariance)
-
-        # Get the parameter names
-        par = self.sig.par
-
         # Get fitted parameter values and uncertainties
-        self.sig.val = np.array(self.m.values[par])
-        self.sig.err = np.array(self.m.errors[par])
-
-        # Get the covariance matrix for sig1
-        self.sig.cov = cov[: len(par), : len(par)]
+        self.fit.val = np.array(self.m.values)
+        self.fit.err = np.array(self.m.errors)
 
         # Get the chi2 / ndof
         self.sig.chi2 = self.m.fmin.reduced_chi2

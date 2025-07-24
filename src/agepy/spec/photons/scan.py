@@ -533,6 +533,13 @@ class Scan(BaseScan):
         elif isinstance(qeff, Scan):
             self._qeff = parse_qeff(*qeff.qeff)
 
+        elif isinstance(qeff, str):
+            if os.path.exists(qeff):
+                with open(qeff, "rb") as f:
+                    qeff = pickle.load(f)
+
+            parse_qeff(*qeff)
+
         else:
             self._qeff = parse_qeff(*qeff)
 

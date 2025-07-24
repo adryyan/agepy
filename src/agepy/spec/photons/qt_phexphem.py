@@ -18,6 +18,7 @@ except ImportError as e:
 import numpy as np
 import pandas as pd
 
+from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
 import matplotlib.colors as colors
 from agepy.qt import MainWindow
@@ -340,6 +341,8 @@ class PhexPhemViewer(MainWindow):
         debug_fit = InteractiveFit(self, n, xe, ye, assignments)
         debug_fit.exec()
 
+        plt.close("all")
+
 
 class InteractiveFit(QtWidgets.QDialog):
     sig_models = {
@@ -576,6 +579,9 @@ class InteractiveFit(QtWidgets.QDialog):
     def accept(self) -> None:
         if not self.m.valid:
             super().reject()
+
+        self.fit.val = np.array(self.m.values)
+        self.fit.err = np.array(self.m.errors)
 
         for i in range(self.n_sig):
             self.assignments[i].assign_fit(
