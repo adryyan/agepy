@@ -525,7 +525,7 @@ class Scan(BaseScan):
 
     @qeff.setter
     def qeff(
-        self, qeff: tuple[NDArray, NDArray, NDArray] | Scan | None
+        self, qeff: tuple[NDArray, NDArray, NDArray] | Scan | str | None
     ) -> None:
         if qeff is None:
             self._qeff = None
@@ -538,7 +538,10 @@ class Scan(BaseScan):
                 with open(qeff, "rb") as f:
                     qeff = pickle.load(f)
 
-            parse_qeff(*qeff)
+                parse_qeff(*qeff)
+
+            else:
+                self._qeff = None
 
         else:
             self._qeff = parse_qeff(*qeff)
@@ -564,7 +567,15 @@ class Scan(BaseScan):
         return self._calib
 
     @calib.setter
-    def calib(self, calib: ArrayLike) -> None:
+    def calib(self, calib: ArrayLike | str) -> None:
+        if isinstance(calib, str):
+            if os.path.exists(calib):
+                with open(calib, "rb") as f:
+                    calib = pickle.load(f)
+
+            else:
+                calib = ((0, 0), (1, 0))
+
         self._calib = parse_calib(calib)
 
     def counts(

@@ -122,6 +122,7 @@ class ReferenceMarker:
         if contains:
             self.pressed = True
             self.parent.toolbar.set_message(self.label)
+            print(self.label)
 
     def on_motion(self, event) -> None:
         if self.pressed and event.inaxes == self.parent.ax:

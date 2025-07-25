@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 import pickle
 import numpy as np
 import pandas as pd
@@ -254,69 +253,6 @@ class EnergyScan(Scan):
         # Remove the uncertainties
         self._energy_uncertainty = np.delete(self._energy_uncertainty, inds)
 
-    def select_by_phex(
-        self,
-        J: int,
-        Elp: str,
-        vp: int,
-        Jp: int,
-        n_std: int = 1,
-        ignore_overlap: bool = False,
-    ) -> NDArray:
-        # Parse the quantum numbers
-        idx = f"{J},{Elp},{vp},{Jp}"
-
-        # Find the phex assignment
-        if idx not in self._phex.index:
-            errmsg = "phex assignment not found."
-            raise ValueError(errmsg)
-
-        phex = self._phex.loc[idx]
-
-        # Get the fit results
-        fit = phex["fit"]
-
-        # Select energy steps within n_std standard deviations of the mean
-        step_idx = np.argwhere(
-            np.abs(self.steps - fit.val[1]) < fit.val[2] * n_std
-        ).flatten()
-
-        # Check if steps were found
-        if len(step_idx) == 0 or ignore_overlap:
-            return step_idx
-
-        # Define energy range
-        e_range = (  # noqa F841
-            fit.val[1] - fit.val[2] * n_std,
-            fit.val[1] + fit.val[2] * n_std,
-        )
-
-        # Check if multiple phex assignments overlap
-        overlap = self._phex.query(
-            "exc_energy > @e_range[0] and exc_energy < @e_range[1]"
-        )
-
-        for row in overlap.itertuples():
-            if row["Index"] == idx:
-                continue
-
-            overlap_idx = np.argwhere(
-                np.abs(self.steps - row["fit"].val[1]) < row["fit"].val[2]
-            ).flatten()
-
-            # Remove the overlapping steps
-            overlap_idx = np.setdiff1d(step_idx, overlap_idx)
-
-            # Check if steps remain
-            if len(overlap_idx) == 0:
-                wrnmsg = "No steps found without overlap"
-                warnings.warn(wrnmsg, stacklevel=1)
-
-            else:
-                step_idx = overlap_idx
-
-        return step_idx
-
     def assign_phexphem(
         self,
         reference: pd.DataFrame,
@@ -344,11 +280,11 @@ class EnergyScan(Scan):
         # Run the application
         return app.exec()
 
-    def save_phex(self, path: str) -> None:
+    def save_phexphem(self, path: str) -> None:
         with open(path, "wb") as f:
             pickle.dump(self._bound, f)
 
-    def load_phex(self, path: str) -> None:
+    def load_phexphem(self, path: str) -> None:
         with open(path, "rb") as f:
             self._bound = pickle.load(f)
 
