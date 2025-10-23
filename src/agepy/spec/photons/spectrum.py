@@ -310,6 +310,7 @@ class Spectrum:
         qeff: object | None = None,
         bkg: Spectrum | None = None,
         calib: object | None = None,
+        **norm_converters: callable,
     ) -> tuple[NDArray, NDArray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
@@ -387,7 +388,12 @@ class Spectrum:
 
         if bkg is not None:
             bkg_spec, bkg_err = bkg.spectrum(
-                anode, bin_edges, roi=roi, calib=calib, bkg=None, qeff=None
+                anode,
+                bin_edges,
+                roi=roi,
+                calib=calib,
+                bkg=None,
+                qeff=None,
             )
 
             # Subtract background
@@ -405,12 +411,21 @@ class Spectrum:
 
         # Normalize data to account for beam intensity, gas
         # pressure, etc.
-        for normalize in self._norm:
-            norm_val, norm_err = getattr(self, normalize)
-            err = np.sqrt(
-                err**2 / norm_val**2 + norm_err**2 * spec**2 / norm_val**4
-            )
-            spec /= norm_val
+        for norm_name, norm_data in self.norm.items():
+            if norm_name in norm_converters:
+                norm_data = norm_converters[norm_name](norm_data)
+
+            if isinstance(norm_data, float):
+                spec /= norm_data
+                err /= norm_data
+
+            else:
+                norm_val = np.mean(norm_data)
+                norm_err = np.std(norm_data, ddof=1, mean=norm_val)
+                err = np.sqrt(
+                    err**2 / norm_val**2 + norm_err**2 * spec**2 / norm_val**4
+                )
+                spec /= norm_val
 
         # Apply x roi filter
         idx_min = np.searchsorted(bin_edges, x_min)
