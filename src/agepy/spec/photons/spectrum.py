@@ -6,11 +6,11 @@ from dataclasses import dataclass
 import os
 import numpy as np
 from numba import njit, prange
-from jacobi import propagate
 from matplotlib import gridspec
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import h5py
+
+from agepy.spec.utils import load_metro_step
 
 from typing import TYPE_CHECKING
 
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from numpy.typing import ArrayLike, NDArray
     from agepy.spec.anodes import PositionAnode
+    import h5py
 
 
 @dataclass(frozen=True)
@@ -30,20 +31,13 @@ class Spectrum:
     ----------
     raw: np.ndarray, shape (N,M)
         Array containing raw delay-line values of photon hits.
-    time: int, optional
+    time: int
         Measurement time in seconds for normalization.
-    norm: dict
-        Additional normalization parameters as combinations of
-        names and either an array of measured values or their
-        average.
 
     """
 
     raw: NDArray
-    time: int = 1
-    norm: dict[str, NDArray | float] = {}
-    step: str = "0.0"
-    scan: str = "0"
+    time: int
 
     def xy(self, anode: PositionAnode) -> NDArray:
         """Get the event coordinates (x, y).
@@ -225,11 +219,10 @@ class Spectrum:
             Region of interest for the detector in the form
             `((xmin, xmax), (ymin, ymax))`. If not provided, the
             full detector is used.
-        bkg: Spectrum or float, optional
+        bkg: Spectrum or float or int, optional
             Background spectrum (dark counts) to be subtracted that can
             be provided either as an instance of `Spectrum` or as a
-            float. For this to work properly, the both spectra
-            should be normalized to their measurement duration.
+            float.
 
         Returns
         -------
@@ -259,45 +252,25 @@ class Spectrum:
         err = np.sqrt(val)
 
         # Normalize data to measurement duration
-        if self.time is not None:
-            val /= self.time
-            err /= self.time
+        val /= self.time
+        err /= self.time
 
         # Subtract background before further normalization
         if isinstance(bkg, Spectrum):
-            if bkg.time is None or self.time is None:
-                errmsg = "Can't subtract background without time information."
-                raise ValueError(errmsg)
-
+            # Process background spectrum
             bkg_val, bkg_err = bkg.counts(anode, roi=roi, bkg=None)
-            # Using just the statistical uncertainty of the background
-            # counts would underestimate the uncertainty of the subtraction
-            bkg_err = np.sqrt(bkg_val * self.time) / self.time
-            val = max(val - bkg_val, 0)
+
+            # Simple subtraction and error propagation
+            # TODO: Fix error propagation?
+            val = max(val - bkg_val, 0.0)
             err = np.sqrt(err**2 + bkg_err**2)
 
         elif isinstance(bkg, (int, float)):
-            val = max(val - bkg, 0)
+            val = max(val - bkg, 0.0)
 
         elif bkg is not None:
             errmsg = "bkg must be Spectrum, int or float"
             raise TypeError(errmsg)
-
-        # Normalize data to account for beam intensity, gas
-        # pressure, etc.
-        for normalization in self.norm:
-            norm = self.norm[normalization]
-            if isinstance(norm, float):
-                val /= norm
-                err /= norm
-
-            else:
-                norm_val = np.mean(norm)
-                norm_err = np.std(norm, ddof=1, mean=norm_val)
-                err = np.sqrt(
-                    err**2 / norm_val**2 + norm_err**2 * val**2 / norm_val**4
-                )
-                val /= norm_val
 
         # Return the counts and the uncertainty
         return val, err
@@ -305,12 +278,11 @@ class Spectrum:
     def spectrum(
         self,
         anode: PositionAnode,
-        bin_edges: ArrayLike,
+        bin_edges: NDArray,
         roi: ArrayLike = ((0, 1), (0, 1)),
         qeff: object | None = None,
         bkg: Spectrum | None = None,
         calib: object | None = None,
-        **norm_converters: callable,
     ) -> tuple[NDArray, NDArray]:
         """Calculate the spectum and its uncertainties for a given
         set of bin edges.
@@ -320,7 +292,7 @@ class Spectrum:
         anode: PositionAnode
             Anode instance with a `process` method that converts raw values
             timing values from the used anode to x, y coordinates.
-        bin_edges: array_like
+        bin_edges: np.ndarray, shape (N,)
             Bin edges for the histogram. For a calibrated
             spectrum, bin edges should be in wavelength units.
             For an uncalibrated spectrum, these should be between
@@ -329,19 +301,12 @@ class Spectrum:
             Region of interest for the detector in the form
             `((xmin, xmax), (ymin, ymax))`. If not provided, assuming
             full detector with `((0, 1), (0, 1))`.
-        qeff: [np.ndarray, np.ndarray, np.ndarray], optional
-            Detector efficiencies in the form `(values, errors, x)`.
-            The efficiencies are interpolated to 512 points between
-            0 and 1.
+        qeff: object, optional
+            Detector efficiencies.
         bkg: Spectrum, optional
             Background spectrum (dark counts) to be subtracted.
-            For this to work properly, both spectra must be normalized
-            to their measurement duration.
-        calib: array_like, shape (2,2), optional
-            Wavelength calibration parameters in the form
-            `((a0, err), (a1, err))`, where `a0` and `a1`
-            correspond to $\\lambda = a_1 x + a_0$ and `err` to the
-            respective uncertainties.
+        calib: object, optional
+            Wavelength calibration.
 
         Returns
         -------
@@ -354,9 +319,6 @@ class Spectrum:
         # Get x and y values of the photon hits
         data = self.xy(anode)
 
-        # Parse the region of interest
-        roi = np.array(roi)
-
         # Apply y roi filter
         y_min, y_max = roi[1]
         data = data[data[:, 1] > y_min]
@@ -367,17 +329,21 @@ class Spectrum:
 
         # Apply calibration to data and roi
         if calib is not None:
-            x_min, x_max = calib.calibrate(roi[0])
             det_bin_edges = calib.revert(bin_edges)
-            data = calib.calibrate(data)
 
         else:
-            x_min, x_max = roi[0]
             det_bin_edges = bin_edges
 
         # Histogram the data
-        spec = np.histogram(data, bins=bin_edges)[0]
+        spec = np.histogram(data, bins=det_bin_edges)[0]
         spec = np.asarray(spec, dtype=np.float64)
+
+        # Apply x roi filter
+        x_min, x_max = roi[0]
+        idx_min = np.searchsorted(det_bin_edges, x_min)
+        idx_max = np.searchsorted(det_bin_edges, x_max)
+        spec[:idx_min] = 0
+        spec[idx_max - 1 :] = 0
 
         # Poisson uncertainties for each bin
         err = np.sqrt(spec)
@@ -386,21 +352,25 @@ class Spectrum:
         spec /= self.time
         err /= self.time
 
+        # Subtract background
         if bkg is not None:
+            # Process the background spectrum
             bkg_spec, bkg_err = bkg.spectrum(
                 anode,
-                bin_edges,
+                det_bin_edges,
                 roi=roi,
-                calib=calib,
+                calib=None,
                 bkg=None,
                 qeff=None,
             )
 
-            # Subtract background
+            # Simple subtraction and error propagation
+            # TODO: Fix error propagation?
             spec -= bkg_spec
             spec[spec < 0] = 0
             err = np.sqrt(err**2 + bkg_err**2)
 
+        # Adjust for detector quantum efficiencies
         if qeff is not None:
             # Get the inverse efficiencies for the chosen binning
             inv_eff, inv_eff_err = qeff.inverse_efficiencies(det_bin_edges)
@@ -409,117 +379,33 @@ class Spectrum:
             spec *= inv_eff
             err = np.sqrt(inv_eff**2 * err**2 + spec**2 * inv_eff_err**2)
 
-        # Normalize data to account for beam intensity, gas
-        # pressure, etc.
-        for norm_name, norm_data in self.norm.items():
-            if norm_name in norm_converters:
-                norm_data = norm_converters[norm_name](norm_data)
-
-            if isinstance(norm_data, float):
-                spec /= norm_data
-                err /= norm_data
-
-            else:
-                norm_val = np.mean(norm_data)
-                norm_err = np.std(norm_data, ddof=1, mean=norm_val)
-                err = np.sqrt(
-                    err**2 / norm_val**2 + norm_err**2 * spec**2 / norm_val**4
-                )
-                spec /= norm_val
-
-        # Apply x roi filter
-        idx_min = np.searchsorted(bin_edges, x_min)
-        idx_max = np.searchsorted(bin_edges, x_max)
-        spec[:idx_min] = 0
-        spec[idx_max - 1 :] = 0
-        err[:idx_min] = 0
-        err[idx_max - 1 :] = 0
-
         # Return the spectrum and uncertainties
         return spec, err
 
-    def transform_norm(self, norm: str, func: callable) -> None:
-        """Transform the specified normalization values using a given
-        function.
 
-        Parameters
-        ----------
-        norm: str
-            Name of the normalization parameter to transform.
-        func: callable
-            Function to apply to the normalization values. The function
-            should take a single argument of type float and return a
-            float.
-
-        """
-        if not hasattr(self, norm):
-            errmsg = f"Unknown normalization {norm}"
-            raise AttributeError(errmsg)
-
-        # Get the current value and uncertainty
-        val = getattr(self, norm)
-
-        # Call function and propagate the uncertainty
-        val, err = propagate(func, val[0], val[1] ** 2)
-
-        # Set the transformed nomalization
-        setattr(self, norm, np.array([val, np.sqrt(err)]))
-
-    def convert_unit(self, norm: str, fro: str, to: str) -> None:
-        """Convert the specified normalization values to a different
-        unit using the pint package.
-
-        Parameters
-        ----------
-        norm: str
-            Name of the normalization parameter to convert.
-        fro: str
-            Unit to convert from (pint).
-        to: str
-            Unit to convert to (pint).
-
-        """
-        # Try to import pint
-        try:
-            from pint import UnitRegistry
-
-        except ImportError as e:
-            errmsg = "pint is required to convert units."
-            raise ImportError(errmsg) from e
-
-        ureg = UnitRegistry()
-
-        # Convert the normalization values
-        self.transform_norm(norm, lambda x: ureg.Quantity(x, fro).m_as(to))
-
-
-def spectrum_from_h5(
+def load_metro_spectrum(
     file: h5py.Group | str,
-    scan: str = "0",
-    step: str = "0.0",
-    time: int | None = None,
     raw: str = "dld_rd#raw",
-    **norm: str,
+    scan_idx: str = "0",
+    step_idx: str = "0.0",
+    time: int = 1,
 ) -> Spectrum:
     """Load a Spectrum from an h5 file generated by metro2hdf.
 
     Parameters
     ----------
-    h5: str or h5py.Group
+    file: str or h5py.Group
         Open h5 file or path.
-    scan: int, optional
-        Scan index. In case of a single measurements / scan
-        the index is `0`.
-    step: str, optional
-        Step value in a scan. If the measurement
-        was not a scan, the step value is `0.0`.
-    time: int, optional
-        Measurement time in seconds for normalization.
     raw: str, optional
         Path to the raw data in the h5 file.
-    **norm: str
-        Path to additional normalization parameters as keyword
-        arguments like the upstream intensity or target density.
+    scan_idx: str, optional
+        Scan index. In case of a single measurements / scan
+        the index is usually `"0"`.
+    step_idx: str, optional
+        Step value in a scan. If the measurement
+        was not a scan, the step value is usually `"0.0"`.
+    time: int, optional
+        Measurement time in seconds for normalization.
 
     Returns
     -------
@@ -529,102 +415,24 @@ def spectrum_from_h5(
     """
     if isinstance(file, str):
         if not os.path.exists(file):
-            errmsg = "Could not find h5 file."
+            errmsg = "Could not find h5 file"
             raise ValueError(errmsg)
 
         if not file.endswith((".h5", ".hdf5")):
-            errmsg = "Unknown file type."
+            errmsg = "Unknown file type; expected hdf5"
             raise ValueError(errmsg)
 
         with h5py.File(file, "r") as h5:
-            _extract_spectrum_from_h5(
-                h5,
-                scan=scan,
-                step=step,
-                raw=raw,
-                time=time,
-                **norm,
-            )
+            data = load_metro_step(h5, raw, scan_idx, step_idx)
 
     elif isinstance(file, h5py.Group):
-        _extract_spectrum_from_h5(
-            file,
-            scan=scan,
-            step=step,
-            raw=raw,
-            time=time,
-            **norm,
-        )
+        data = load_metro_step(file, raw, scan_idx, step_idx)
 
     else:
-        errmsg = "file must be open h5 file or the path."
+        errmsg = "file must be open h5 file or the path"
         raise TypeError(errmsg)
 
-
-def _extract_spectrum_from_h5(
-    h5: h5py.Group,
-    scan: str = "0",
-    step: str = "0.0",
-    raw: str = "dld_rd#raw",
-    time: int | None = None,
-    **norm: str,
-) -> Spectrum:
-    # Appends scan index to the path
-    group_raw = raw + "/" + scan
-
-    # Check if the data is found
-    if group_raw not in h5:
-        errmsg = f"{group_raw} not found."
-        raise KeyError(errmsg)
-
-    if step not in h5[group_raw]:
-        errmsg = f"{step} not found in {group_raw}"
-        raise KeyError(errmsg)
-
-    # Load the raw data
-    group_raw = h5[group_raw]
-    data_raw = np.array(group_raw[step])
-
-    # Load normalization values
-    for name, group in norm.items():
-        group_norm = group + "/" + scan
-
-        if group_norm not in h5:
-            errmsg = f"{group_norm} not found."
-            raise KeyError(errmsg)
-
-        # Load the dataset / group
-        data_norm = h5[group_norm]
-
-        # Pass this to Spectrum
-        spec_norm = {}
-
-        # Handle different types of recorded data
-        if isinstance(data_norm, h5py.Dataset):
-            # Values averaged by metro
-            data_norm = np.asarray(data_norm)
-
-            if data_norm.shape == (1,):
-                spec_norm[name] = float(data_norm[0])
-
-            elif data_norm.ndim == 1:
-                idx = list(group_raw.keys()).index(step)
-                spec_norm[name] = np.array([data_norm[idx]])
-
-            else:
-                errmsg = f"Could not parse data in {group_norm}."
-                raise RuntimeError(errmsg)
-
-        elif step in data_norm:
-            # Values recorded by metro every x seconds
-            spec_norm[name] = np.array(data_norm[step])
-
-        else:
-            errmsg = f"{step} not found in {group_norm}."
-            raise KeyError(errmsg)
-
-    # Initialize the Spectrum dataclass
-    return Spectrum(data_raw, time=time, norm=spec_norm, step=step, scan=scan)
+    return Spectrum(data, time)
 
 
 @njit()
