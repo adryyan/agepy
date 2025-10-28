@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import warnings
-import pickle
+from dataclasses import dataclass, field
+from contextlib import contextmanager
 import numpy as np
+from numba import njit, prange
 import matplotlib.pyplot as plt
 
 from .scan import Scan
-from .util import parse_calib
 
 from typing import TYPE_CHECKING
 
@@ -17,6 +17,135 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
     from .anodes import PositionAnode
+
+
+@dataclass(frozen=True)
+class QEff:
+    xval: NDArray
+    xerr: NDArray
+    yval: NDArray
+    yerr: NDArray
+    cache: tuple[NDArray, NDArray] = field(default=None, init=False)
+
+    @contextmanager
+    def cache_eff(self, xe: NDArray, mc_samples: int = 10000):
+        """Cache efficiencies for a given set of x edges."""
+        cache = self.eff(xe, mc_samples=mc_samples)
+        object.__setattr__(self, "cache", cache)
+        try:
+            yield
+
+        finally:
+            object.__setattr__(self, "cache", None)
+
+    def eff(self, xe: NDArray, n: int = 10000) -> tuple[NDArray, NDArray]:
+        # Return cached efficiencies (only with context)
+        if self.cache is not None:
+            return self.cache
+
+        # Get the bin centers
+        xc = (xe[1:] + xe[:-1]) * 0.5
+
+        # Interpolate and evaluate at the given bin centers
+        eff = np.interp(xc, self.xval, self.yval, left=np.nan, right=np.nan)
+
+        # Generate random samples for x and y
+        rng = np.random.default_rng()
+        y_samples = rng.normal(
+            loc=self.yval, scale=self.yerr, size=(n, self.yval.size)
+        )
+        x_samples = rng.normal(
+            loc=self.xval, scale=self.xerr, size=(n, self.xval.size)
+        )
+
+        # Generate the efficiency samples
+        eff_samples = self.generate_eff_samples(xc, x_samples, y_samples, n)
+
+        # Calculate the standard deviation
+        err = np.std(eff_samples, axis=0, ddof=1)
+
+        return eff, err
+
+    @staticmethod
+    @njit(parallel=True, fastmath=True)
+    def generate_eff_samples(
+        x: NDArray, x_samples: NDArray, y_samples: NDArray, n: int
+    ) -> NDArray:
+        eff_samples = np.zeros((n, x.size), dtype=np.float64)
+
+        for i in prange(n):
+            eff_samples[i] = np.interp(x, x_samples[i], y_samples[i])
+
+        return eff_samples
+
+
+def eval_qeff(
+    scan: Scan, bins: int = 512, sig: str = "Voigt", bkg: str = "Constant"
+) -> QEff | None:
+    """Interactively evaluate the quantum efficiencies by fitting
+    peaks in the spectra.
+
+    Parameters
+    ----------
+    scan: Scan
+        Quantum efficiency measurement.
+    bins: int or array_like
+        Bin number or edges between 0 and 1.
+    sig: str
+        The default signal model to use for fits. Can be changed
+        in the interactive fit window.
+    bkg: str
+        The default background model to use for fits. Can be
+        changed in the interactive fit window.
+
+    """
+    from agepy.qt import get_qtapp
+    from .qeff_widget import EvalQEff
+
+    # Get the Qt application
+    app = get_qtapp()
+
+    # Intialize the viewer
+    mw = EvalQEff(scan, bins, sig, bkg)
+    mw.show()
+
+    # Run the application
+    app.exec()
+
+    yval, yerr, xval, xerr = [], [], [], []
+
+    # Append the fit results
+    for fit in mw.fit:
+        if fit is None:
+            continue
+
+        yval.append(fit.value("n"))
+        yerr.append(fit.error("n"))
+        xval.append(fit.value("loc"))
+        xerr.append(fit.error("loc"))
+
+    # Return None if only one or no fits were performed yet
+    if len(yval) < 2:
+        return None
+
+    # Convert to numpy arrays
+    yval = np.asarray(yval, dtype=np.float64)
+    yerr = np.asarray(yerr, dtype=np.float64)
+    xval = np.asarray(xval, dtype=np.float64)
+    xerr = np.asarray(xerr, dtype=np.float64)
+
+    # Normalize the values
+    ymax = np.max(yval)
+
+    # Sort the values
+    inds = np.argsort(xval)
+
+    return QEff(
+        yval[inds] / ymax,
+        yerr[inds] / ymax,
+        xval,
+        xerr,
+    )
 
 
 class QEffScan(Scan):
@@ -82,118 +211,6 @@ class QEffScan(Scan):
         # Initialize the result arrays
         self.fit = np.full(len(self.steps), None, dtype=object)
 
-    @property
-    def calib(self) -> NDArray:
-        return self._calib
-
-    @calib.setter
-    def calib(self, calib: ArrayLike) -> None:
-        if calib != ((0, 0), (1, 0)):
-            wrnmsg = "Cannot set custom calib for QEffScan."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        self._calib = parse_calib(((0, 0), (1, 0)))
-
-    @property
-    def qeff(self) -> tuple[NDArray, NDArray, NDArray] | None:
-        y, yerr, x = [], [], []
-
-        # Append the fit results
-        for fit in self.fit:
-            if fit is None:
-                continue
-
-            y.append(fit.value("n"))
-            yerr.append(fit.error("n"))
-            x.append(fit.value("loc"))
-
-        # Return None if fits were performed yet
-        if len(y) == 0:
-            return None
-
-        # Convert to numpy arrays
-        y = np.asarray(y, dtype=np.float64)
-        yerr = np.asarray(yerr, dtype=np.float64)
-        x = np.asarray(x, dtype=np.float64)
-
-        # Normalize the values
-        ymax = np.max(y)
-
-        # Sort the values
-        inds = np.argsort(x)
-
-        return y[inds] / ymax, yerr[inds] / ymax, x[inds]
-
-    @qeff.setter
-    def qeff(
-        self, qeff: tuple[NDArray, NDArray, NDArray] | Scan | None
-    ) -> None:
-        if qeff is not None:
-            wrnmsg = "Cannot manually set qeff for QEffScan."
-            warnings.warn(wrnmsg, stacklevel=1)
-
-        self._qeff = None
-
-    def interpolate(
-        self,
-        x: ArrayLike,
-        mc_samples: int = 10000,
-    ) -> tuple[NDArray, NDArray]:
-        # Get the fit values
-        qeff = self.qeff
-
-        if qeff is not None:
-            py, pyerr, px = qeff
-
-        else:
-            errmsg = "Quantum efficiency is not evaluated."
-            raise ValueError(errmsg)
-
-        # Generate samples
-        rng = np.random.default_rng()
-        y_samples = rng.normal(loc=py, scale=pyerr, size=(mc_samples, len(py)))
-        eff_samples = np.stack(
-            [np.interp(x, px, y, left=0, right=0) for y in y_samples], axis=0
-        )
-
-        # Calculate the mean and standard deviation
-        eff = np.mean(eff_samples, axis=0, keepdims=True)
-        err = np.std(eff_samples, axis=0, ddof=1, mean=eff)
-        eff = eff.flatten()
-
-        return eff, err
-
-    def interactive(
-        self, bins: int | ArrayLike = 512, sig="Voigt", bkg="Constant"
-    ) -> int:
-        """Interactively evaluate the quantum efficiencies by fitting
-        peaks in the spectra.
-
-        Parameters
-        ----------
-        bins: int or array_like
-            Bin number or edges between 0 and 1.
-        sig: str
-            The default signal model to use for fits. Can be changed
-            in the interactive fit window.
-        bkg: str
-            The default background model to use for fits. Can be
-            changed in the interactive fit window.
-
-        """
-        from agepy.qt import get_qtapp
-        from .qt_qeff import EvalQEff
-
-        # Get the Qt application
-        app = get_qtapp()
-
-        # Intialize the viewer
-        mw = EvalQEff(self, bins, sig, bkg)
-        mw.show()
-
-        # Run the application
-        return app.exec()
-
     def plot(
         self,
         ax: Axes | None = None,
@@ -253,22 +270,3 @@ class QEffScan(Scan):
         ax.set_title("Measured Lateral Quantum Efficiency")
 
         return fig, ax
-
-    def save_qeff(self, filepath: str) -> None:
-        """
-        Save the evaluated quantum efficiencies.
-
-        Parameters
-        ----------
-        filepath: str
-            Path to the file where the qeff will be saved.
-
-        """
-        qeff = self.qeff
-
-        if qeff is None:
-            errmsg = "Quantum efficiency is not evaluated."
-            raise ValueError(errmsg)
-
-        with open(filepath, "wb") as f:
-            pickle.dump(qeff, f)
