@@ -203,8 +203,8 @@ class Spectrum:
 
     def counts(
         self,
-        anode: PositionAnode,
-        roi: ArrayLike = ((0, 1), (0, 1)),
+        anode: PositionAnode | None = None,
+        roi: tuple[tuple[float, float], tuple[float, float]] | None = None,
         bkg: Spectrum | float | int | None = None,
     ) -> tuple[float, float]:
         """Get the number of counts in the spectrum and the estimated
@@ -233,32 +233,44 @@ class Spectrum:
             The propagated Poisson uncertainty.
 
         """
-        # Coordinates of photon hits (x, y)
-        xy = self.xy(anode)
+        if roi is not None:
+            # ROI can only be used with an anode for processing the data
+            if anode is not None:
+                errmsg = "anode needs to be provided with roi"
+                raise ValueError(errmsg)
 
-        # Apply y roi filter
-        xy = xy[xy[:, 1] > roi[1][0]]
-        xy = xy[xy[:, 1] < roi[1][1]]
+            # Coordinates of photon hits (x, y)
+            data = self.xy(anode)
 
-        # Discard y values
-        xy = xy[:, 0].flatten()
+            # Apply y roi filter
+            data = data[data[:, 1] > roi[1][0]]
+            data = data[data[:, 1] < roi[1][1]]
 
-        # Apply x roi filter
-        xy = xy[xy > roi[0][0]]
-        xy = xy[xy < roi[0][1]]
+            # Discard y values
+            data = data[:, 0].flatten()
 
-        # Calculate the number of counts and the Poisson uncertainty
-        val = len(xy)
+            # Apply x roi filter
+            data = data[data > roi[0][0]]
+            data = data[data < roi[0][1]]
+
+            # Get the number of remaining counts
+            val = data.size
+
+        else:
+            # Get the number of counts
+            val = self.raw.size
+
+        # Calculate the Poisson uncertainty
         err = np.sqrt(val)
 
         # Normalize data to measurement duration
         val /= self.time
         err /= self.time
 
-        # Subtract background before further normalization
+        # Subtract background
         if isinstance(bkg, Spectrum):
             # Process background spectrum
-            bkg_val, bkg_err = bkg.counts(anode, roi=roi, bkg=None)
+            bkg_val, bkg_err = bkg.counts(anode=anode, roi=roi, bkg=None)
 
             # Simple subtraction and error propagation
             # TODO: Fix error propagation?

@@ -3,13 +3,9 @@ from __future__ import annotations
 try:
     from PySide6 import QtGui
 
-except ImportError:
-    try:
-        from PyQt6 import QtGui
-
-    except ImportError as e:
-        errmsg = "PySide6 required."
-        raise ImportError(errmsg) from e
+except ImportError as e:
+    errmsg = "PySide6 required."
+    raise ImportError(errmsg) from e
 
 from importlib.resources import path as ilrpath
 
@@ -24,10 +20,10 @@ if TYPE_CHECKING:
     from numpy.typing import ArrayLike
 
 
-class SpectrumViewer(MainWindow):
+class ScanView(MainWindow):
     def __init__(self, scan: Scan, bins: int | ArrayLike) -> None:
         # Set up the main window
-        super().__init__(title="Spectrum Viewer")
+        super().__init__(title="ScanView")
         self.add_plot()
         self.add_toolbar()
         self.add_action_prev_next(self.plot_previous, self.plot_next)

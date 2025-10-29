@@ -13,10 +13,9 @@ from .scan import Scan
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray, ArrayLike
+    from numpy.typing import NDArray
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
-    from .anodes import PositionAnode
 
 
 @dataclass(frozen=True)
@@ -28,9 +27,9 @@ class QEff:
     cache: tuple[NDArray, NDArray] = field(default=None, init=False)
 
     @contextmanager
-    def cache_eff(self, xe: NDArray, mc_samples: int = 10000):
+    def cache_eff(self, xe: NDArray, n: int = 10000):
         """Cache efficiencies for a given set of x edges."""
-        cache = self.eff(xe, mc_samples=mc_samples)
+        cache = self.eff(xe, n=n)
         object.__setattr__(self, "cache", cache)
         try:
             yield
@@ -39,6 +38,25 @@ class QEff:
             object.__setattr__(self, "cache", None)
 
     def eff(self, xe: NDArray, n: int = 10000) -> tuple[NDArray, NDArray]:
+        """Interpolated quantum efficiencies with uncertainties
+        propagated with Monte Carlo error propagation.
+
+        Parameters
+        ----------
+        xe: np.ndarray, shape(N,)
+            Detector binning. The interpolation is evaluated at the
+            bin centers.
+        n: int, optional
+            Number of Monte Carlo samples to generate.
+
+        Returns
+        -------
+        eff: np.ndarray, shape(N-1,)
+            The interpolated efficiencies.
+        err: np.ndarray, shape(N-1,)
+            The corresponding uncertainties.
+
+        """
         # Return cached efficiencies (only with context)
         if self.cache is not None:
             return self.cache
@@ -59,24 +77,12 @@ class QEff:
         )
 
         # Generate the efficiency samples
-        eff_samples = self.generate_eff_samples(xc, x_samples, y_samples, n)
+        eff_samples = _generate_eff_samples(xc, x_samples, y_samples, n)
 
         # Calculate the standard deviation
         err = np.std(eff_samples, axis=0, ddof=1)
 
         return eff, err
-
-    @staticmethod
-    @njit(parallel=True, fastmath=True)
-    def generate_eff_samples(
-        x: NDArray, x_samples: NDArray, y_samples: NDArray, n: int
-    ) -> NDArray:
-        eff_samples = np.zeros((n, x.size), dtype=np.float64)
-
-        for i in prange(n):
-            eff_samples[i] = np.interp(x, x_samples[i], y_samples[i])
-
-        return eff_samples
 
 
 def eval_qeff(
@@ -148,125 +154,80 @@ def eval_qeff(
     )
 
 
-class QEffScan(Scan):
-    """Scan over grating positions with a spectrum for each step.
+def plot_qeff(
+    qeff: QEff,
+    ax: Axes | None = None,
+    color: str = "k",
+    label: str | None = None,
+) -> tuple[Figure, Axes]:
+    """Plot the calculated detector efficiencies.
 
     Parameters
     ----------
-    data_files: array_like
-        List of data files (str) to be processed.
-    anode: PositionAnode
-        Anode object to process the raw data.
-    raw: str, optional
-        Path to the raw data in the data files.
-    time_per_step: int, optional
-        Time per step in the scan.
-    roi: array_like, shape (2,2), optional
-        Region of interest for the detector in the form
-        `((xmin, xmax), (ymin, ymax))`.
-    **normalize: str
-        Path to additional normalization parameters as keyword
-        arguments like the upstream intensity or target density.
+    qeff: Qeff,
+        Evaluated quantum efficiency data.
+    ax: Axes, optional
+        A matplotlib axes to draw on.
+    color: str, optional
+        A color to use for the efficiencies.
+    label: str, optional
+        A label for the plotted data.
 
-    Attributes
-    ----------
-    spectra: np.ndarray, shape (N,)
-        Array of the loaded Spectrum objects.
-    steps: np.ndarray, shape (N,)
-        Array of the scan variable values.
-    m_id: np.ndarray, shape (N,)
-        Array of the measurement numbers.
-    roi: np.ndarray, shape (2,2)
-        Region of interest for the detector.
-    qeff: [np.ndarray, np.ndarray, np.ndarray] or None
-        Detector efficiencies in the form `(values, errors, x)`
-        with shapes (M,).
+    Returns
+    -------
+    fig: Figure
+        The matplotlib figure.
+    ax: Axes
+        The matplotlib axes.
 
     """
+    # Create the figure and axis
+    if ax is None:
+        fig, ax = plt.subplots()
 
-    def __init__(
-        self,
-        data_files: str | ArrayLike,
-        anode: PositionAnode,
-        raw: str = "dld_rd#raw",
-        time_per_step: int | ArrayLike | None = None,
-        roi: ArrayLike = ((0, 1), (0, 1)),
-        **normalize: str,
-    ) -> None:
-        # Load and process data
-        super().__init__(
-            data_files,
-            anode,
-            scan_var=None,
-            raw=raw,
-            time_per_step=time_per_step,
-            roi=roi,
-            **normalize,
-        )
+    else:
+        fig = ax.get_figure()
 
-        # Force the x roi to cover the full detector
-        self.roi[0, 0] = 0
-        self.roi[0, 1] = 1
+    # Get the interpolated efficiencies
+    xe = np.histogram([], bins=1024, range=(0, 1))
+    xc = (xe[1:] + xe[:-1]) * 0.5
+    eff, err = qeff.eff(xe)
 
-        # Initialize the result arrays
-        self.fit = np.full(len(self.steps), None, dtype=object)
+    ax.errorbar(
+        qeff.xval,
+        qeff.yval,
+        yerr=qeff.yerr,
+        xerr=qeff.xerr,
+        fmt="s",
+        color=color,
+        label=label,
+    )
 
-    def plot(
-        self,
-        ax: Axes | None = None,
-        color: str = "k",
-        label: str | None = None,
-    ) -> tuple[Figure, Axes]:
-        """Plot the calculated detector efficiencies.
+    # Fix the ylim
+    ylim = ax.get_ylim()
+    ax.set_ylim(ylim)
 
-        Parameters
-        ----------
-        ax: Axes, optional
-            A matplotlib axes to draw on.
-        color: str, optional
-            A color to use for the efficiencies.
-        label: str, optional
-            A label for the plotted data.
+    # Plot the interpolated values
+    ax.plot(xc, eff, color=color, linestyle="-")
+    ax.fill_between(xc, eff - err, eff + err, color=color, alpha=0.3)
 
-        Returns
-        -------
-        fig: Figure
-            The matplotlib figure.
-        ax: Axes
-            The matplotlib axes.
+    # Set ylim back to auto
+    ax.set_ylim(auto=True)
 
-        """
-        # Create the figure and axis
-        if ax is None:
-            fig, ax = plt.subplots()
+    # Set the labels
+    ax.set_xlabel("Detector Position [arb. u.]")
+    ax.set_ylabel("Efficiency [arb. u.]")
+    ax.set_xlim(0, 1)
+    ax.set_title("Measured Lateral Quantum Efficiency")
 
-        else:
-            fig = ax.get_figure()
+    return fig, ax
 
-        # Get the interpolated efficiencies
-        x_interp = np.linspace(0, 1, 1000)
-        eff, err = self.interpolate(x_interp)
 
-        # Get the fit values
-        y, yerr, x = self.qeff
+@njit(parallel=True, fastmath=True)
+def _generate_eff_samples(x: NDArray, xs: NDArray, ys: NDArray) -> NDArray:
+    effs = np.zeros((ys.size, x.size), dtype=np.float64)
 
-        ax.errorbar(x, y, yerr=yerr, fmt="s", color=color, label=label)
+    for i in prange(ys.size):
+        effs[i] = np.interp(x, xs[i], ys[i])
 
-        # Fix the ylim
-        ylim = ax.get_ylim()
-        ax.set_ylim(ylim)
-
-        # Plot the interpolated values
-        ax.plot(x_interp, eff, color=color, linestyle="-")
-        ax.fill_between(x_interp, eff - err, eff + err, color=color, alpha=0.3)
-
-        # Set ylim back to auto
-        ax.set_ylim(auto=True)
-
-        # Set the labels
-        ax.set_xlabel("Detector Position [arb. u.]")
-        ax.set_ylabel("Efficiency [arb. u.]")
-        ax.set_xlim(0, 1)
-        ax.set_title("Measured Lateral Quantum Efficiency")
-
-        return fig, ax
+    return effs

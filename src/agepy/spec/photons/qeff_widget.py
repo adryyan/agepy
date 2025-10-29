@@ -3,24 +3,17 @@ from __future__ import annotations
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
 
-    qt_binding = "PySide6"
-
 except ImportError as e:
     errmsg = "PySide6 required for interactive fitting."
     raise ImportError(errmsg) from e
 
-try:
-    from iminuit import Minuit, cost
-    from iminuit.qtwidget import make_widget
-
-except ImportError as e:
-    errmsg = "iminuit required for fitting."
-    raise ImportError(errmsg) from e
-
+from iminuit import Minuit, cost
+from iminuit.qtwidget import make_widget
+from iminuit.util import describe, make_with_signature, merge_signatures
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .qt_scan import SpectrumViewer
+from .scan_widget import ScanView
 from agepy.spec.fit_models import (
     SumModel1d,
     FitModel1d,
@@ -40,16 +33,19 @@ if TYPE_CHECKING:
     from .qeff import QEffScan
 
 
-class EvalQEff(SpectrumViewer):
+class EvalQEff(ScanView):
     def __init__(
         self,
         scan: QEffScan,
-        bins: int | ArrayLike,
+        bins: int,
         sig: str,
         bkg: str,
     ) -> None:
         # Set up the main window
         super().__init__(scan, bins)
+
+        # Initialize the result array
+        self.fit = np.full(len(self.steps), None, dtype=object)
 
         # Add the fit action
         self.fit_action, self.selector = self.add_rect_selector(
