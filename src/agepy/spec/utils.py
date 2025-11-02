@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from pathlib import Path
 import h5py
 import numpy as np
 
@@ -7,6 +9,22 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+@contextmanager
+def open_metro_h5(measurement: str, data_dir: str = "."):
+    # glob pattern
+    pattern = f"{measurement}*.h5"
+
+    # Get matching file path
+    match = list(Path(data_dir).glob(pattern))
+
+    if len(match) == 0:
+        errmsg = f"Could not find measurement {measurement}"
+        raise FileNotFoundError(errmsg)
+
+    with h5py.File(match[0].resolve(), "r") as h5:
+        yield h5
 
 
 def load_metro_step(

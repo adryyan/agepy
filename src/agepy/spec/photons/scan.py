@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 import pickle
 import numpy as np
-import h5py
 
 from agepy.spec.data import MetroValue
-from agepy.spec.utils import load_metro_scan
+from agepy.spec.utils import open_metro_h5, load_metro_scan
 from .spectrum import Spectrum
 
 from typing import TYPE_CHECKING
@@ -148,7 +146,8 @@ class Scan:
 
 
 def load_scan(
-    file: str,
+    measurement: str,
+    data_dir: str = ".",
     raw: str = "dld_rd#raw",
     steps: str | None = None,
     target_density: str | None = None,
@@ -163,8 +162,10 @@ def load_scan(
 
     Parameters
     ----------
-    file: str
-        Path to measurment hdf5 file processed by metro2hdf.
+    measurement: str
+        Metro measurement number, e.g. "042".
+    data_dir: str
+        Path to a directory containing h5 files processed by metro2hdf.
     raw: str, optional
         Path to the raw data in the h5 file.
     steps: str or None, optional
@@ -186,15 +187,7 @@ def load_scan(
         Dataclass containing the loaded data.
 
     """
-    if not os.path.exists(file):
-        errmsg = "Could not find h5 file"
-        raise ValueError(errmsg)
-
-    if not file.endswith((".h5", ".hdf5")):
-        errmsg = "Unknown file type; expected hdf5"
-        raise ValueError(errmsg)
-
-    with h5py.File(file, "r") as h5:
+    with open_metro_h5(measurement, data_dir=data_dir) as h5:
         # Retrieve the raw events and step names (strings)
         step_vals, scan_raw = load_metro_scan(h5, raw, scan_idx)
 
