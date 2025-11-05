@@ -84,7 +84,7 @@ def load_data_stream(
 
     # Check if the data is a continuous data stream (metro)
     if (
-        "Frequency" not in data.attrs
+        "Frequency" not in h5f[data].attrs
         or h5f[data].attrs["Frequency"] != "continuous"
     ):
         errmsg = f"Data {data} is not 'continuous'"
@@ -134,7 +134,7 @@ def read_steps(
     """
     for data in h5f:
         # Check for the Frequency attribute
-        if "Frequency" not in data.attrs:
+        if "Frequency" not in h5f[data].attrs:
             continue
 
         # Check data contains continuous data streams
