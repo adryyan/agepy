@@ -27,15 +27,12 @@ class PhexPhem:
             errmsg = "Could't find any phexphem.yaml"
             raise FileNotFoundError(errmsg)
 
-        # Metadata specific to beamtimes
+        # Config specific to beamtimes
         self.beamtimes = {}
 
-        # Look up of loaded data
-        self.data = {}
-
-        # Build the mapping DataFrame from config files found in the
+        # Build DataFrames from config files found in the
         # glob'ed directories
-        step_map = {}
+        spectra = {}
         ref = {}
         qeff = {}
 
@@ -124,21 +121,18 @@ class PhexPhem:
                     steps = read_steps(h5f)
 
                     # Load the measured beamline energies
-                    energies = load_data_stream(h5f, group)
-                    energies = np.array(energies, dtype=np.float64).flatten()
+                    energies = np.asarray(load_data_stream(h5f, group))
 
-                # Create a new entry for each step
-                # TODO: Test if this is too slow
-                measurements[num] = pd.concat(
-                    [row.to_frame().T] * len(steps), ignore_index=True
-                )
+                n = energies.size
+                m = {col: np.full(n, val) for col, val in row.items()}
+                m["beamline_energy"] = energies
+                measurements[num] = pd.DataFrame(m)
 
-                # Set the dataset names as the index and add the energies
+                # Set the dataset names as the index
                 measurements[num].index = steps
-                measurements[num]["beamline_energy"] = energies
 
             # Create a DataFrame with num as a MultiIndex
-            step_map[beamtime] = pd.concat(measurements)
+            spectra[beamtime] = pd.concat(measurements)
 
             # Get the path to the ref.csv
             ref_csv = beamtime_dir / "ref.csv"
@@ -164,13 +158,24 @@ class PhexPhem:
 
             # Load the scan info from scans.csv
             qeff[beamtime] = pd.read_csv(
-                ref_csv,
+                qeff_csv,
                 index_col="num",
                 usecols=ref_dtype.keys(),
                 dtype=ref_dtype,
             )
 
         # Create a DataFrames with beamtime as a MultiIndex
-        self.step_map = pd.concat(step_map)
+        self.spectra = pd.concat(spectra)
         self.ref = pd.concat(ref)
         self.qeff = pd.concat(qeff)
+
+        # Create columns for the data
+        self.spectra["spectrum"] = None
+        self.spectra["target_density"] = None
+        self.spectra["beamline_flux"] = None
+        self.ref["spectrum"] = None
+        self.ref["target_density"] = None
+        self.ref["beamline_flux"] = None
+        self.qeff["spectrum"] = None
+        self.qeff["target_density"] = None
+        self.qeff["beamline_flux"] = None

@@ -99,7 +99,16 @@ def load_data_stream(
         raise KeyError(errmsg)
 
     if step_idx is None:
-        return [np.array(dset) for dset in h5f[scan].values()]
+        data = []
+        for dset in h5f[scan].values():
+            if dset.size == 0:
+                shape = list(dset.shape)
+                shape[0] += 1
+                dset = np.full(shape, np.nan)
+
+            data.append(np.squeeze(dset))
+
+        return data
 
     # Append the step index to the path
     step = scan + "/" + step_idx
