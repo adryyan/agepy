@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 
 class PhexPhem:
-    def __init__(self, data_dir: str, verbose: int = 0) -> None:
+    def __init__(
+        self, data_dir: str, lazy: bool = True, verbose: int = 0
+    ) -> None:
         # Path to the directory containing beamtime directories
         data_dir = Path(data_dir)
 
@@ -91,7 +93,11 @@ class PhexPhem:
 
             # Get the path to the group in the hdf5 data files
             # containing the measured beamline energies (step values)
-            group = self.beamtimes[beamtime]["beamline_energy"]["data"]
+            h5_energy = self.beamtimes[beamtime]["beamline_energy"]["data"]
+
+            h5_spectrum = self.beamtimes[beamtime]["spectrum"]["data"]
+            h5_flux = self.beamtimes[beamtime]["beamline_flux"]["data"]
+            h5_density = self.beamtimes[beamtime]["target_density"]["data"]
 
             # Get the path to the scans.csv
             scans_csv = beamtime_dir / "scans.csv"
@@ -114,18 +120,41 @@ class PhexPhem:
 
             for num, row in df.iterrows():
                 if verbose > 1:
-                    print(f"  Parsing measurement {num}...")
+                    print(f"Parsing {beamtime} measurement {num}...")
 
                 with open_metro_h5(num, data_dir=beamtime_data) as h5f:
                     # Dataset names (step values) for lazy loading
                     steps = read_steps(h5f)
 
                     # Load the measured beamline energies
-                    energies = np.asarray(load_data_stream(h5f, group))
+                    energies = np.asarray(load_data_stream(h5f, h5_energy))
 
-                n = energies.size
+                    # Make sure the data has the same size
+                    n = np.min([len(steps), energies.size])
+                    steps = steps[:n]
+                    energies = energies[:n]
+
+                    # Don't load the other data if lazy loading is chosen
+                    if lazy:
+                        spectrum = None
+                        flux = None
+                        density = None
+
+                    else:
+                        spectrum = load_data_stream(h5f, h5_spectrum)[:n]
+                        flux = load_data_stream(h5f, h5_flux)[:n]
+                        density = load_data_stream(h5f, h5_density)[:n]
+
+                # Create a new DataFrame with the row entries expanded
+                # to the step length
                 m = {col: np.full(n, val) for col, val in row.items()}
+
+                # Add new columns for the (not yet) loaded data
                 m["beamline_energy"] = energies
+                m["spectrum"] = spectrum
+                m["beamline_flux"] = flux
+                m["target_density"] = density
+
                 measurements[num] = pd.DataFrame(m)
 
                 # Set the dataset names as the index
@@ -164,18 +193,52 @@ class PhexPhem:
                 dtype=ref_dtype,
             )
 
-        # Create a DataFrames with beamtime as a MultiIndex
+        # Create DataFrames with beamtime as a MultiIndex
         self.spectra = pd.concat(spectra)
         self.ref = pd.concat(ref)
         self.qeff = pd.concat(qeff)
 
         # Create columns for the data
-        self.spectra["spectrum"] = None
-        self.spectra["target_density"] = None
-        self.spectra["beamline_flux"] = None
         self.ref["spectrum"] = None
         self.ref["target_density"] = None
         self.ref["beamline_flux"] = None
         self.qeff["spectrum"] = None
         self.qeff["target_density"] = None
         self.qeff["beamline_flux"] = None
+
+    def lazy_load_spectrum(
+        self,
+        beamtime: str,
+        num: str,
+        step: str,
+    ) -> NDArray:
+        return self.lazy_load_data("spectra", "spectrum", beamtime, num, step)
+
+    def lazy_load_data(
+        self,
+        df: str,
+        name: str,
+        beamtime: str,
+        num: str,
+        step: str,
+    ) -> NDArray:
+        data = getattr(self, df).loc[beamtime].loc[num].loc[step][name]
+
+        if data is not None:
+            print("Data already loaded")
+            return data
+
+        # Path to the data file
+        data_dir = self.beamtimes[beamtime]["data"]
+
+        # hdf5 path in the data file
+        h5_spectrum = self.beamtimes[beamtime][name]["data"]
+
+        # Load the data
+        with open_metro_h5(num, data_dir=data_dir) as h5f:
+            data = load_data_stream(h5f, h5_spectrum, step_idx=step)
+
+        # Store the data for future calls
+        self.spectra.loc[beamtime].loc[num].loc[step][name] = data
+
+        return data

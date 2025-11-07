@@ -11,8 +11,69 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+class LazyLoader:
+    def __init__(self, data_dir: str | Path = "."):
+        if isinstance(data_dir, str):
+            data_dir = Path(data_dir)
+
+        # Look for data files
+        matches = list(data_dir.glob("[0-9][0-9][0-9]_*.h5"))
+
+        if len(matches) == 0:
+            errmsg = "Could't find any hdf5 data files"
+            raise FileNotFoundError(errmsg)
+
+        self.measurements = {}
+
+        for match in matches:
+            num = match.name[:3]
+            self.measurements[num] = lazyload(num, data_dir)
+
+    def __contains__(self, num: str) -> callable:
+        return num in self.measurements
+
+    def __getitem__(self, num: str) -> callable:
+        return self.measurements[num]
+
+
+def lazyload(num: str, data_dir: str | Path = "."):
+    # Cache for aready loaded data
+    cache = {}
+
+    if isinstance(data_dir, str):
+        data_dir = Path(data_dir)
+
+    data_dir = data_dir.resolve()
+
+    def loader(
+        data_key: str, scan_key: str = "0", step_key: str | None = None
+    ) -> dict[str, NDArray] | NDArray:
+        if data_key in cache and scan_key in cache[data_key]:
+            if step_key is None:
+                return cache[data_key][scan_key].copy()
+
+            elif step_key in cache[data_key][scan_key]:
+                return cache[data_key][scan_key][step_key]
+
+            else:
+                errmsg = f"Step {step_key} not found in {data_key}/{scan_key}"
+                raise KeyError(errmsg)
+
+        with open_metro_h5(num, data_dir=data_dir) as h5f:
+            data = load_data_stream(
+                h5f, data_key, scan_key=scan_key, step_key=None
+            )
+
+        # Update the cache
+        cache.update({data_key: {scan_key: data}})
+
+        return loader(data_key, scan_key=scan_key, step_key=step_key)
+
+    return loader
+
+
 @contextmanager
-def open_metro_h5(measurement: str, data_dir: str = ".") -> h5py.File:
+def open_metro_h5(measurement: str, data_dir: str | Path = ".") -> h5py.File:
     """Open an hdf5 file produced by metro2hdf.
 
     Convenience wrapper around h5py.File for easier access using
@@ -32,11 +93,15 @@ def open_metro_h5(measurement: str, data_dir: str = ".") -> h5py.File:
         Open hdf5 file.
 
     """
+    # Create a Path instance
+    if isinstance(data_dir, str):
+        data_dir = Path(data_dir)
+
     # glob pattern
     pattern = f"{measurement}*.h5"
 
     # Get matching file path
-    match = list(Path(data_dir).glob(pattern))
+    match = list(data_dir.glob(pattern))
 
     if len(match) == 0:
         errmsg = f"Could not find measurement {measurement}"
@@ -48,14 +113,14 @@ def open_metro_h5(measurement: str, data_dir: str = ".") -> h5py.File:
 
 def load_data_stream(
     h5f: h5py.File,
-    data: str,
-    scan_idx: str = "0",
-    step_idx: str | None = None,
-) -> list[NDArray] | NDArray:
+    data_key: str,
+    scan_key: str = "0",
+    step_key: str | None = None,
+) -> dict[str, NDArray] | NDArray:
     """Load 'continuous' metro data streams from a scan
     in an open hdf5 file.
 
-    If a step index `step_idx` is specified, the data is
+    If a step index `step_key` is specified, the data is
     returned as a single `np.ndarray`.
 
     Parameters
@@ -64,99 +129,59 @@ def load_data_stream(
         Open hdf5 file (see `open_metro_h5`).
     data: str
         Name of the metro data stream (e.g. `"device#value"`).
-    scan_idx: str, optional
+    scan_key: str, optional
         Index of the scan to be loaded. Usually `"0"` in case of
         measurements with one or no scan.
-    step_idx: str, optional
+    step_key: str, optional
         Index of the step to be loaded. If `None` all datasets
         in the scan are returned.
 
     Returns
     -------
-    data: list of np.ndarray or np.ndarray
-        Dataset(s).
+    data: dict or np.ndarray
+        Dictionary of names (step values) and corresponding
+        datasets or a single dataset if `step_key` is specified.
 
     """
     # Check if the data stream is found
-    if data not in h5f:
-        errmsg = f"Data {data} not found"
+    if data_key not in h5f:
+        errmsg = f"Data {data_key} not found"
         raise KeyError(errmsg)
 
     # Check if the data is a continuous data stream (metro)
     if (
-        "Frequency" not in h5f[data].attrs
-        or h5f[data].attrs["Frequency"] != "continuous"
+        "Frequency" not in h5f[data_key].attrs
+        or h5f[data_key].attrs["Frequency"] != "continuous"
     ):
-        errmsg = f"Data {data} is not 'continuous'"
+        errmsg = f"Data {data_key} is not 'continuous'"
         raise ValueError(errmsg)
 
     # Append the scan index to the path
-    scan = data + "/" + scan_idx
+    scan = data_key + "/" + scan_key
 
     # Check if the scan index is present
     if scan not in h5f:
-        errmsg = f"Scan index {scan_idx} not found in {data}"
+        errmsg = f"Scan index {scan_key} not found in {data_key}"
         raise KeyError(errmsg)
 
-    if step_idx is None:
-        data = []
-        for dset in h5f[scan].values():
+    if step_key is None:
+        data = {}
+        for step_key, dset in h5f[scan].items():
             if dset.size == 0:
                 shape = list(dset.shape)
                 shape[0] += 1
                 dset = np.full(shape, np.nan)
 
-            data.append(np.squeeze(dset))
+            data[step_key] = np.squeeze(dset)
 
         return data
 
     # Append the step index to the path
-    step = scan + "/" + step_idx
+    step = scan + "/" + step_key
 
     # Check if the scan index is present
     if step not in h5f:
-        errmsg = f"Scan index {step_idx} not found in {scan}"
+        errmsg = f"Scan index {step_key} not found in {scan}"
         raise KeyError(errmsg)
 
-    return np.array(h5f[step])
-
-
-def read_steps(
-    h5f: h5py.File,
-    scan_idx: str = "0",
-) -> list[str]:
-    """Read the names of the datasets in a metro scan (step values).
-
-    Parameters
-    ----------
-    h5f: h5py.File
-        Open hdf5 file (see `open_metro_h5`).
-    scan_idx: str, optional
-        Index of the scan to be loaded. Usually `"0"` in case of
-        measurements with one or no scan.
-
-    Returns
-    -------
-    list of str
-        Dataset names in the scan.
-
-    """
-    for data in h5f:
-        # Check for the Frequency attribute
-        if "Frequency" not in h5f[data].attrs:
-            continue
-
-        # Check data contains continuous data streams
-        if h5f[data].attrs["Frequency"] == "continuous":
-            # Append the scan index to the path
-            scan = data + "/" + scan_idx
-
-            # Check if the scan index is present
-            if scan not in h5f:
-                errmsg = f"Scan index {scan_idx} not found in {data}"
-                raise KeyError(errmsg)
-
-            return list(h5f[scan].keys())
-
-    errmsg = f"Could not find steps in {h5f.filename}"
-    raise ValueError(errmsg)
+    return np.squeeze(h5f[step])
