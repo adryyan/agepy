@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-class LazyLoader:
+class MetroLoader:
     def __init__(self, data_dir: str | Path = "."):
         if isinstance(data_dir, str):
             data_dir = Path(data_dir)
@@ -27,7 +27,7 @@ class LazyLoader:
 
         for match in matches:
             num = match.name[:3]
-            self.measurements[num] = lazyload(num, data_dir)
+            self.measurements[num] = metroload(num, data_dir)
 
     def __contains__(self, num: str) -> callable:
         return num in self.measurements
@@ -36,18 +36,70 @@ class LazyLoader:
         return self.measurements[num]
 
 
-def lazyload(num: str, data_dir: str | Path = "."):
-    # Cache for aready loaded data
+def metroload(
+    num: str, data_dir: str | Path = "."
+) -> callable[[str, str, str | None], dict[str, NDArray] | NDArray]:
+    """Load data from an hdf5 file created by metro2hdf.
+
+    Parameters
+    ----------
+    num: str
+        Metro measurement number (e.g. `"042"`).
+    data_dir: str or Path, optional
+        Path to the directory containing the hdf5 file.
+
+    Returns
+    -------
+    callable
+        Loader function.
+
+    Examples
+    --------
+    >>> data = metroload("042", data_dir="2024-07-BESSY-H2/")
+    >>> spec = data("dld_rd#raw", step_key="12.269")
+
+    """
+    # Cache once loaded data for faster return next time
     cache = {}
 
-    if isinstance(data_dir, str):
+    if not isinstance(data_dir, Path):
         data_dir = Path(data_dir)
 
-    data_dir = data_dir.resolve()
+    # Get matching file path
+    match = list(data_dir.glob(f"{num}*.h5"))
+
+    if len(match) == 0:
+        errmsg = f"Could not find measurement {num}"
+        raise FileNotFoundError(errmsg)
+
+    data_file = match[0].resolve()
 
     def loader(
         data_key: str, scan_key: str = "0", step_key: str | None = None
     ) -> dict[str, NDArray] | NDArray:
+        """Loads specified data from the hdf5 file.
+
+        When one or all steps for one data key are loaded all steps
+        are cached for future calls.
+
+        Parameters
+        ----------
+        data_key: str
+            Name of the metro data stream (e.g. `"device#value"`).
+        scan_key: str, optional
+            Index of the scan to be loaded. Usually `"0"` in case of
+            measurements with one or no scan.
+        step_key: str, optional
+            Index of the step to be loaded. If `None` all datasets
+            in the scan are returned.
+
+        Returns
+        -------
+        dict or np.ndarray
+            Dictionary of names (step values) and corresponding
+            datasets or a single dataset if `step_key` is specified.
+
+        """
         if data_key in cache and scan_key in cache[data_key]:
             if step_key is None:
                 return cache[data_key][scan_key].copy()
@@ -59,7 +111,7 @@ def lazyload(num: str, data_dir: str | Path = "."):
                 errmsg = f"Step {step_key} not found in {data_key}/{scan_key}"
                 raise KeyError(errmsg)
 
-        with open_metro_h5(num, data_dir=data_dir) as h5f:
+        with h5py.File(data_file, "r") as h5f:
             data = load_data_stream(
                 h5f, data_key, scan_key=scan_key, step_key=None
             )
@@ -73,7 +125,7 @@ def lazyload(num: str, data_dir: str | Path = "."):
 
 
 @contextmanager
-def open_metro_h5(measurement: str, data_dir: str | Path = ".") -> h5py.File:
+def open_metro_h5(num: str, data_dir: str | Path = ".") -> h5py.File:
     """Open an hdf5 file produced by metro2hdf.
 
     Convenience wrapper around h5py.File for easier access using
@@ -82,7 +134,7 @@ def open_metro_h5(measurement: str, data_dir: str | Path = ".") -> h5py.File:
 
     Parameters
     ----------
-    measurement: str
+    num: str
         Metro measurement number (e.g. `"042"`).
     data_dir: str, optional
         Path to the directory containing the hdf5 file.
@@ -98,13 +150,13 @@ def open_metro_h5(measurement: str, data_dir: str | Path = ".") -> h5py.File:
         data_dir = Path(data_dir)
 
     # glob pattern
-    pattern = f"{measurement}*.h5"
+    pattern = f"{num}*.h5"
 
     # Get matching file path
     match = list(data_dir.glob(pattern))
 
     if len(match) == 0:
-        errmsg = f"Could not find measurement {measurement}"
+        errmsg = f"Could not find measurement {num}"
         raise FileNotFoundError(errmsg)
 
     with h5py.File(match[0].resolve(), "r") as h5f:
@@ -127,7 +179,7 @@ def load_data_stream(
     ----------
     h5f: h5py.File
         Open hdf5 file (see `open_metro_h5`).
-    data: str
+    data_key: str
         Name of the metro data stream (e.g. `"device#value"`).
     scan_key: str, optional
         Index of the scan to be loaded. Usually `"0"` in case of
